@@ -412,6 +412,7 @@ class Session(object):
             self.logger.info("PUT %s -> %s" % (url, response.status_code))
         else:
             self.logger.info("PUT %s (dryrun)" % (url))
+            response = None
         return response
 
 
@@ -757,7 +758,7 @@ class Interpreter(object):
 
 
     def push(self, namepattern=None):
-
+        
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
             return
@@ -765,6 +766,9 @@ class Interpreter(object):
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
+
+        if not namepattern:
+            namepattern = "*"
 
         recipes = self.kbh.getRecipes(namepattern.replace("*", "%"))
         if len(recipes) == 0:
@@ -799,7 +803,7 @@ class Interpreter(object):
 
 
 def usage():
-    print("""Usage: %s [options]
+    print("""Usage: %s [options] [command [argument] ]
   -v           --verbose             increase the logging level
   -d           --debug               run at maximum debug level
   -n           --dryrun              do not write any data
@@ -807,7 +811,9 @@ def usage():
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
   -P file      --pwfile file         read password from file
-  -k file      --kbhfile file        Kleiner Brauhelfer database file""" % sys.argv[0])
+  -k file      --kbhfile file        Kleiner Brauhelfer database file
+Commands:
+  push "namepattern"                 push recipes from KBH to GF""" % sys.argv[0])
 
 
 
@@ -891,48 +897,14 @@ def main():
 
     interpreter = Interpreter(kbh=kbh, session=session)
 
-    interpreter.push("#01*")
+    op = None
+    arg = None
+    if len(args) >= 1:
+        op = args[0]
+    if len(args) >= 2:
+        arg = args[1]
 
-
-
-
-    #recipe = kbh.getRecipe("#001%")
-    #print(recipe)
-    #session.register(recipe)
-    #print(recipe)
-    #recipe.print()
-    #recipe.save()
-    #print(recipe)
-
-    #recipes = kbh.getRecipes('#%')
-    #for recipe in recipes:
-    #    print(recipe)
-    #    recipe.print()
-
-    #recipes = session.getMyRecipes()
-    #for recipe in recipes:
-    #    print(recipe)
-    #    recipe.delete()
-    #    recipe.reload()
-    #    print(recipe)
-
-    #recipes = session.getMyRecipes(full=True)
-    #for recipe in recipes:
-    #    print(recipe)
-
-    #recipe = Recipe(session, filename="recipe.xml")
-
-    #recipe = session.getRecipe(id=180955)
-    #print(recipe)
-    #recipe.print()
-
-    #recipe = session.getRecipe(id=181001)
-    #print(recipe)
-
-    #f = Fermentable(session, id=3)
-    #f.print()
-
-
+    result = getattr(interpreter, op)(arg)
 
     if session:
         session.logout()

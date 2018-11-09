@@ -68,7 +68,15 @@ Usage: ./Grainfather.py [options]
   -P file      --pwfile file         read password from file
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 
-$ ./Grainfather.py -v -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite
+$ ./Grainfather.py -v -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite push "#004 Altbier"
+INFO:session:GET https://oauth.grainfather.com/customer/account/login/ -> 200
+INFO:session:POST https://oauth.grainfather.com/customer/account/loginPost/ -> 200
+INFO:session:GET https://brew.grainfather.com -> 200
+INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=1 -> 200
+INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=2 -> 200
+INFO:interpreter:Updating <bound Recipe id 181607 named "#004 Altbier">
+INFO:session:PUT https://brew.grainfather.com/recipes/181607 -> 200
+INFO:session:GET https://brew.grainfather.com/logout -> 200
 ```
 
 ### TODO
@@ -82,6 +90,8 @@ $ ./Grainfather.py -v -u f-grainfather@familie-steinberg.org -P ~/.grainfather.p
 - document KBH [[]]-tags
 - implement more KBH [[]]-tags (e.g. malt-ppg)
 - split: Python API / command line tool
+- write first line of KBH comment to GF description
+- allow a separator to suppress parts of KBH comments
 
 Late future:
 
