@@ -137,7 +137,8 @@ class KleinerBrauhelfer(object):
         data["is_public"] = self.extractFromText(sud["Kommentar"], "Public", default=False)
         data["image_url"] = self.extractFromText(sud["Kommentar"], "Image")
         # hack hack
-        #data["image_url"] = "&src=" + data["image_url"]
+        if data["image_url"]:
+            data["image_url"] = "&src=" + data["image_url"]
         
         # fermentables
         data["fermentables"] = []
@@ -353,6 +354,7 @@ class Session(object):
     username = None
     metadata = None
     logger = None
+    readonly = False
 
 
 
@@ -391,27 +393,35 @@ class Session(object):
 
 
 
-    def post(self, url, data=None, json=None, files=None):
+    def post(self, url, data=None, json=None, files=None, force=False):
 
-        response = self.session.post(url, data=data, json=json, files=files)
-        self.logger.info("POST %s -> %s" % (url, response.status_code))
+        if (self.readonly == False) or force:
+            response = self.session.post(url, data=data, json=json, files=files)
+            self.logger.info("POST %s -> %s" % (url, response.status_code))
+        else:
+            self.logger.info("POST %s (dryrun)" % (url))
+            response = None
         return response
 
 
 
-    def put(self, url, data=None, json=None):
+    def put(self, url, data=None, json=None, force=False):
 
-        response = self.session.put(url, data=data, json=json)
-        self.logger.info("PUT %s -> %s" % (url, response.status_code))
+        if (self.readonly == False) or force:
+            response = self.session.put(url, data=data, json=json)
+            self.logger.info("PUT %s -> %s" % (url, response.status_code))
+        else:
+            self.logger.info("PUT %s (dryrun)" % (url))
         return response
 
 
 
-    def __init__(self, username=None, password=None):
+    def __init__(self, username=None, password=None, readonly=False):
 
         self.session = requests.session()
         self.username = username
-        
+        self.readonly = readonly
+
         self.logger = logging.getLogger('session')
 
         # fetch the login page
@@ -427,7 +437,7 @@ class Session(object):
 
         # post to the login form
         payload = {'form_key': form_key, 'login[username]': username, 'login[password]': password}
-        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload)
+        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, force=True)
 
         # fetch start page from the recipe creator
         response = self.get("https://brew.grainfather.com")
@@ -451,19 +461,19 @@ class Session(object):
 
 
 
-    def register(self, obj):
+    def register(self, obj, id=None):
 
         """If the given object has been defined locally and is not yet bound to
         a Grainfather session, this method will bind it without actually saving
         it to the Grainfather site. Saving can be done by a subsequent save() call
         on the object."""
 
+        if id:
+            obj.set("id", id)
+
         if obj.session == None:
-
             obj.session = self
-
         else:
-
             self.logger.error("%s is already bound to a session" % obj)
 
 
@@ -609,18 +619,20 @@ class Object(object):
 
 
 
-    def save(self):
+    def save(self, id=None):
+
+        if id:
+            self.data["id"] = id
 
         self.tidy()
 
         if "id" in self.data:
-            self.session.logger.info("Saving recipe")
             response = self.session.put(self.urlsave.format(api_token=self.session.metadata["user"]["api_token"], id=self.data["id"]), json=self.data)
         else:
-            self.session.logger.info("Creating recipe")
             response = self.session.post(self.urlcreate.format(api_token=self.session.metadata["user"]["api_token"]), json=self.data)
 
-        self.data = json.loads(response.text)
+        if response:
+            self.data = json.loads(response.text)
 
 
 
@@ -728,14 +740,69 @@ class Fermentable(Object):
 
 
 
+class Interpreter(object):
 
+    kbh = None
+    session = None
+    logger = None
+
+
+    def __init__(self, kbh=None, session=None):
+
+        self.kbh = kbh
+        self.session = session
+
+        self.logger = logging.getLogger('interpreter')
+
+
+
+    def push(self, namepattern=None):
+
+        if not self.kbh:
+            self.logger.error("No KBH database, use -k option")
+            return
+            
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        recipes = self.kbh.getRecipes(namepattern.replace("*", "%"))
+        if len(recipes) == 0:
+            return
+
+        # we have to know all our recipes on the GF server so that
+        # we can decide which recipe to create and which to update
+        gf_recipes = self.session.getMyRecipes()
+
+        for recipe in recipes:
+            
+            # try to find matching GF recipe
+            id = None
+            for gf_recipe in gf_recipes:
+                if gf_recipe.get("name") == recipe.get("name"):
+                    id = gf_recipe.get("id")
+            if id:
+                self.session.register(recipe, id=id)
+                self.logger.info("Updating %s" % recipe)
+                recipe.save()
+            else:
+                self.logger.info("Creating %s" % recipe)
+                self.session.register(recipe)
+                recipe.save()
+            
+
+
+    def pull(namepattern):
+
+        return
 
 
 
 def usage():
-    print("""%s [options]
+    print("""Usage: %s [options]
   -v           --verbose             increase the logging level
-  -d           --debug               set to maximum logging level
+  -d           --debug               run at maximum debug level
+  -n           --dryrun              do not write any data
   -h           --help                this help message
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
@@ -752,15 +819,18 @@ def main():
     session = None
     kbh = None
     kbhFile = None
+    dryrun = False
 
     logging.basicConfig()
     level = logging.WARNING
-    logging.getLogger().setLevel(level)
+    logger = logging.getLogger()
+    requests_log = logging.getLogger("requests.packages.urllib3")
+    requests_log.setLevel(logging.WARN)
 
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdhu:p:P:k:",
-                                   ["verbose", "debug", "help", "user=", "password=", "pwfile=", "kbhfile="])
+                                   "vdnhu:p:P:k:",
+                                   ["verbose", "debug", "dryrun", "help", "user=", "password=", "pwfile=", "kbhfile="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -771,20 +841,23 @@ def main():
         if o in ("-v", "--verbose"):
             if level == logging.WARNING:
                 level = logging.INFO
-                logging.getLogger().setLevel(level)
+                logger.setLevel(level)
             elif level == logging.INFO:
                 level = logging.DEBUG
-                logging.getLogger().setLevel(level)
+                logger.setLevel(level)
             else:
-                requests_log = logging.getLogger("requests.packages.urllib3")
-                requests_log.setLevel(logging.WARN)
-                requests_log.setLevel(logging.DEBUG)
+                requests_log.setLevel(level)
                 requests_log.propagate = True
 
         elif o in ("-d", "--debug"):
             level = logging.DEBUG
-            logging.getLogger().setLevel(level)
+            logger.setLevel(level)
+            requests_log.setLevel(level)
+            requests_log.propagate = True
             http.client.HTTPConnection.debuglevel = 1
+
+        elif o in ("-n", "--dryrun"):
+            dryrun = True
 
         elif o in ("-h", "--help"):
             usage()
@@ -811,20 +884,25 @@ def main():
             assert False, "unhandled option"
 
     if (username and password):
-        session = Session(username, password)
+        session = Session(username, password, readonly=dryrun)
 
     if (kbhFile):
         kbh = KleinerBrauhelfer(kbhFile)
-        
+
+    interpreter = Interpreter(kbh=kbh, session=session)
+
+    interpreter.push("#01*")
 
 
-    recipe = kbh.getRecipe("#001%")
-    print(recipe)
-    session.register(recipe)
-    print(recipe)
+
+
+    #recipe = kbh.getRecipe("#001%")
+    #print(recipe)
+    #session.register(recipe)
+    #print(recipe)
     #recipe.print()
-    recipe.save()
-    print(recipe)
+    #recipe.save()
+    #print(recipe)
 
     #recipes = kbh.getRecipes('#%')
     #for recipe in recipes:
