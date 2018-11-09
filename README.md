@@ -81,17 +81,16 @@ INFO:session:GET https://brew.grainfather.com/logout -> 200
 
 ### TODO
 
-- should we make use of recipe["parent_recipe_id"] somehow?
 - implement recipe["fermentation_steps"]
-- implement the actual synchronization
-- operations: delete, rename, ...
+- more operations: delete (rename? ...others?)
 - better error handling
-- image_url ?
 - document KBH [[]]-tags
 - implement more KBH [[]]-tags (e.g. malt-ppg)
 - split: Python API / command line tool
 - write first line of KBH comment to GF description
 - allow a separator to suppress parts of KBH comments
+- push: compare mtime, push only updated recipes
+- ...then we should also implement a --force option
 
 Late future:
 

@@ -123,6 +123,7 @@ class KleinerBrauhelfer(object):
         data["calories"] = round(kcal * 3.55)
         # this date seems to be overwritten by the GF server
         data["created_at"] = "%s.000000Z" % sud["Erstellt"]
+        data["updated_at"] = "%s.000000Z" % sud["Gespeichert"]
         # XXX: may pick description from first paragraph of "Kommentar"?
         data["description"] = ""
         data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0))
@@ -165,6 +166,7 @@ class KleinerBrauhelfer(object):
             data["fermentables"].append({
                     "name": zutat["Name"],
                     "ppg": round(float(zutat["Ausbeute"]) / 2.5),
+                    "lovibond": Session.ebcToLovibond(float(zutat["Farbe"])),
                     "fermentable_usage_type_id": usage,
                     "fermentable_id": None,
                     "amount": float("%.3f" % (zutat["erg_Menge"] / 1000)) })
@@ -757,7 +759,7 @@ class Interpreter(object):
 
 
 
-    def push(self, namepattern=None):
+    def push(self, namepattern=None, force=False):
         
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
@@ -785,10 +787,17 @@ class Interpreter(object):
             for gf_recipe in gf_recipes:
                 if gf_recipe.get("name") == recipe.get("name"):
                     id = gf_recipe.get("id")
+            # the "updated_at" checking does not yet work, force for now
+            force = True
             if id:
-                self.session.register(recipe, id=id)
-                self.logger.info("Updating %s" % recipe)
-                recipe.save()
+                if (gf_recipe.get("updated_at") > recipe.get("updated_at")) and (not force):
+                    self.logger.info("%s needs no update" % recipe)
+                    self.logger.debug("kbh: %s, gf: %s" % (recipe.get("updated_at"), gf_recipe.get("updated_at"))) # XXX
+                else:
+                    self.session.register(recipe, id=id)
+                    self.logger.info("Updating %s" % recipe)
+                    self.logger.debug("kbh: %s, gf: %s" % (recipe.get("updated_at"), gf_recipe.get("updated_at"))) # XXX
+                    recipe.save()
             else:
                 self.logger.info("Creating %s" % recipe)
                 self.session.register(recipe)
