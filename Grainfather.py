@@ -24,13 +24,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
 import os
 import re
 import sys
-import getopt
-import requests
-import logging
+import time
 import json
+import getopt
+import logging
 import sqlite3
-from enum import Enum
+import requests
 import http.client
+from enum import Enum
 
 
 
@@ -87,6 +88,14 @@ class KleinerBrauhelfer(object):
 
 
 
+    def localToUtc(self, t):
+
+        u = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", 
+                          time.gmtime(time.mktime(time.strptime(t, "%Y-%m-%dT%H:%M:%S"))))
+        return u
+
+
+
     def sudToRecipe(self, sud):
 
         """Converts a "sud" read from the KBH database into a Recipe object.
@@ -121,15 +130,15 @@ class KleinerBrauhelfer(object):
         kcal = round((6.9 * abw + 4 * ( wfg - 0.1 )) * 10 * 0.1 * d);
         # we reverse engineered this calories factor
         data["calories"] = round(kcal * 3.55)
-        # this date seems to be overwritten by the GF server
-        data["created_at"] = "%s.000000Z" % sud["Erstellt"]
-        data["updated_at"] = "%s.000000Z" % sud["Gespeichert"]
-        # XXX: may pick description from first paragraph of "Kommentar"?
-        data["description"] = ""
+        # dates seem to be overwritten by the GF server
+        # in fact, they update timestamps seems to updates somewhat later ?!?!
+        data["created_at"] = self.localToUtc(sud["Erstellt"])
+        data["updated_at"] = self.localToUtc(sud["Gespeichert"])
+        # pick description from first paragraph of "Kommentar"
+        data["description"] = sud["Kommentar"].splitlines()[0]
         data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0))
         data["ibu"] = sud["IBU"]
-        # XXX: may pick from [[]]
-        data["is_active"] = True
+        data["is_active"] = True # what is this?
         if sud["JungbiermengeAbfuellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
             data["losses"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["JungbiermengeAbfuellen"]))
         data["notes"] = re.sub(r'\[\[[^\]]*\]\]\n?', r'', sud["Kommentar"])
@@ -787,16 +796,15 @@ class Interpreter(object):
             for gf_recipe in gf_recipes:
                 if gf_recipe.get("name") == recipe.get("name"):
                     id = gf_recipe.get("id")
-            # the "updated_at" checking does not yet work, force for now
-            force = True
+                    break
             if id:
                 if (gf_recipe.get("updated_at") > recipe.get("updated_at")) and (not force):
-                    self.logger.info("%s needs no update" % recipe)
-                    self.logger.debug("kbh: %s, gf: %s" % (recipe.get("updated_at"), gf_recipe.get("updated_at"))) # XXX
+                    self.logger.info("%s needs no update" % gf_recipe)
+                    self.logger.debug("kbh:%s, gf:%s" % (recipe.get("updated_at"), gf_recipe.get("updated_at")))
                 else:
                     self.session.register(recipe, id=id)
-                    self.logger.info("Updating %s" % recipe)
-                    self.logger.debug("kbh: %s, gf: %s" % (recipe.get("updated_at"), gf_recipe.get("updated_at"))) # XXX
+                    self.logger.info("Updating %s" % gf_recipe)
+                    self.logger.debug("kbh:%s, gf:%s" % (recipe.get("updated_at"), gf_recipe.get("updated_at")))
                     recipe.save()
             else:
                 self.logger.info("Creating %s" % recipe)

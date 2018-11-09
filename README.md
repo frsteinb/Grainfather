@@ -4,27 +4,29 @@
 
 ### Introduction
 
-The [Grainfather company][1] produces home brewing equipment and
-sells it to customers all over the
-world. With relatively affordable as well as high quality products
-many home brewers love their shiny stainless steel Grainfather
-equipment. :-) Brew recipes can be managed on the [Grainfather community
-web site][2] and kept snychronized with iOS and Android apps on
-smartphones and tablet computers. While this recipe management is not
-necessarily limited to Grainfather brewing hardware, a specific
-benefit of such a combination is that the app can easily control
-the brewing process from water heating, over precise mash step profiles,
-up to the boil with various boil addition alarms.
+[Grainfather][1] is the name of a series of home brewing equipment
+produced by the New Zealand company Bevie and sold to customers all
+over the world. With relatively affordable as well as high quality
+products many home brewers love their shiny stainless steel
+Grainfather equipment. :-) Brew recipes can be managed on the
+[Grainfather community web site][2] and kept snychronized with iOS and
+Android apps on smartphones and tablet computers. While this recipe
+management is not necessarily limited to Grainfather brewing hardware,
+a specific benefit of such a combination is that the app can easily
+control the brewing process through a Bluetooth connection, from water
+heating, over precise mash step profiles, up to the boil with various
+boil addition alarms.
 
-The [Kleiner Brauhelfer][3] (KBH) is an open source software for brew recipe
-development and management. It is widely used among home brewers in
-Germany for many years. Therefore many brewers have lots of recipes
-and according brew session data stored in their "KBH" database. Many
-of them do not want to use another management software, when they
-recently replaced their brewing equipment by a Grainfather.
+The [Kleiner Brauhelfer][3] (KBH) is an open source software for brew
+recipe development and management. It is widely used among home
+brewers primarily in Germany for many years. Therefore many brewers
+have lots of recipes and according brew session data stored in their
+"KBH" database. Many of them do not want to use another management
+software, when they recently replaced their brewing equipment by a
+Grainfather.
 
-The aim of this project is to transfer and synchronize recipes
-from a personal KBH database to the Grainfather site.
+The aim of this project is to transfer and synchronize recipes from a
+personal KBH database to the Grainfather site.
 
 ### License
 
@@ -32,28 +34,28 @@ See [LICENSE.txt][4]
 
 ### Prerequisites
 
-This software is being developed and used on current Linux and MacOS
-systems as of 2018. It is implemented in Python 3.x. Besides that
-there should be no specific needs.
+This software is being developed and used on current Linux systems as
+of 2018. It is implemented in Python 3.x. You will need the "requests"
+package[5], e.g. the Debian package "python3-requests" on Ubuntu or
+Debian systems.
 
-Of course you need KBH. The system running this software just has
-to have access to the SQLite3 database file. E.g., I run KBH on
-a Mac and keep the database stored on my Nextcloud server. That
-Nextcloud file is also shared by my Linux host, on which I run
-this software.
+Of course you need KBH. The system running this software just has to
+have access to the SQLite3 database file of KBH. E.g., I run KBH on a
+Mac and keep the database stored on my Nextcloud server. That
+Nextcloud file is also shared by my Linux host, on which I run this
+software.
 
-And of course you need an account on the Grainfather community site.
+Of course you also need an account on the Grainfather community site.
 When running this software your will have to supply your Grainfather
-account credentials. If you already have an account, you probably
-want to create a new one, just to make sure this software will not
-overwrite or delete any data on your primary account.
+community account credentials. If you already have an account, you
+probably want to create a new one, just to make sure this software
+will not overwrite or mix up any data on your primary account.
 
 ### Status
 
-The project is at a very early stage and it is unclear how far I
-will push it. Feel free to try it out. Feedback and contributions
-are welcome. But please to not expect thing to work without any
-problems.
+This project is at a very early stage and it is unclear how far I will
+push it. Feel free to try it out. Feedback and contributions are
+welcome. But please do not expect things to work without any problems.
 
 ### Usage Example
 
@@ -87,14 +89,10 @@ INFO:session:GET https://brew.grainfather.com/logout -> 200
 - document KBH [[]]-tags
 - implement more KBH [[]]-tags (e.g. malt-ppg)
 - split: Python API / command line tool
-- write first line of KBH comment to GF description
 - allow a separator to suppress parts of KBH comments
-- push: compare mtime, push only updated recipes
-- ...then we should also implement a --force option
+- daemon mode, listening for database updates in the background
 
-Late future:
-
-- ratings
+- handle ratings somehow?
 - (partial) sync back from GF to KBH?
 
 
@@ -102,6 +100,6 @@ Late future:
 [2]: https://brew.grainfather.com
 [3]: https://github.com/Gremmel/kleiner-brauhelfer
 [4]: LICENSE.txt
-
+[5]: http://docs.python-requests.org/en/master/user/install/
 
 
