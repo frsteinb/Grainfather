@@ -27,9 +27,11 @@ import sys
 import time
 import json
 import getopt
+import fnmatch
 import logging
 import sqlite3
 import requests
+import datetime
 import http.client
 from enum import Enum
 
@@ -428,11 +430,24 @@ class Session(object):
 
 
 
-    def __init__(self, username=None, password=None, readonly=False):
+    def delete(self, url, force=False):
+
+        if (self.readonly == False) or force:
+            response = self.session.delete(url)
+            self.logger.info("DELETE %s -> %s" % (url, response.status_code))
+        else:
+            self.logger.info("DELETE %s (dryrun)" % (url))
+            response = None
+        return response
+
+
+
+    def __init__(self, username=None, password=None, readonly=False, force=False):
 
         self.session = requests.session()
         self.username = username
         self.readonly = readonly
+        self.force = force
 
         self.logger = logging.getLogger('session')
 
@@ -502,7 +517,7 @@ class Session(object):
 
 
 
-    def getMyRecipes(self, full=False):
+    def getMyRecipes(self, namepattern=None, full=False):
 
         recipes = []
 
@@ -525,6 +540,9 @@ class Session(object):
                 url = responsedata["next_page_url"]
             else:
                 break
+
+        if namepattern:
+            recipes = list(filter(lambda r: fnmatch.fnmatch(r.get("name"), namepattern), recipes))
 
         return recipes
 
@@ -650,10 +668,7 @@ class Object(object):
 
     def delete(self):
 
-        self.data["status"] = "deleted"
-        self.data["deleted_at"] = str(datetime.datetime.now())[:19]
-
-        self.save()
+        response = self.session.delete(self.urlsave.format(api_token=self.session.metadata["user"]["api_token"], id=self.data["id"]))
 
 
 
@@ -768,7 +783,53 @@ class Interpreter(object):
 
 
 
-    def push(self, namepattern=None, force=False):
+    def list(self, namepattern=None):
+
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        recipes = self.session.getMyRecipes(namepattern)
+
+        for recipe in recipes:
+            
+            print(recipe)
+
+
+
+    def dump(self, namepattern=None):
+
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        recipes = self.session.getMyRecipes(namepattern)
+
+        for recipe in recipes:
+            
+            recipe.print()
+
+
+
+    def delete(self, namepattern=None):
+        
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        if not namepattern:
+            self.logger.error("No name pattern supplied")
+            return
+
+        recipes = self.session.getMyRecipes(namepattern)
+
+        for recipe in recipes:
+            
+            recipe.delete()
+            
+
+
+    def push(self, namepattern=None):
         
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
@@ -794,11 +855,12 @@ class Interpreter(object):
             # try to find matching GF recipe
             id = None
             for gf_recipe in gf_recipes:
+                #print("XXX %s %s" % (gf_recipe.get("name"), gf_recipe.get("updated_at")))
                 if gf_recipe.get("name") == recipe.get("name"):
                     id = gf_recipe.get("id")
                     break
             if id:
-                if (gf_recipe.get("updated_at") > recipe.get("updated_at")) and (not force):
+                if (gf_recipe.get("updated_at") > recipe.get("updated_at")) and (not self.session.force):
                     self.logger.info("%s needs no update" % gf_recipe)
                     self.logger.debug("kbh:%s, gf:%s" % (recipe.get("updated_at"), gf_recipe.get("updated_at")))
                 else:
@@ -824,14 +886,17 @@ def usage():
   -v           --verbose             increase the logging level
   -d           --debug               run at maximum debug level
   -n           --dryrun              do not write any data
+  -f           --force               force operations
   -h           --help                this help message
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
   -P file      --pwfile file         read password from file
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
-  push "namepattern"                 push recipes from KBH to GF""" % sys.argv[0])
-
+  list                               list user's recipes
+  dump ["namepattern"]               dump user's recipes 
+  push ["namepattern"]               push recipes from KBH to GF
+  delete "namepattern"               delete user's recipes""" % sys.argv[0])
 
 
 def main():
@@ -843,6 +908,7 @@ def main():
     kbh = None
     kbhFile = None
     dryrun = False
+    force = False
 
     logging.basicConfig()
     level = logging.WARNING
@@ -852,8 +918,8 @@ def main():
 
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdnhu:p:P:k:",
-                                   ["verbose", "debug", "dryrun", "help", "user=", "password=", "pwfile=", "kbhfile="])
+                                   "vdnfhu:p:P:k:",
+                                   ["verbose", "debug", "dryrun", "force", "help", "user=", "password=", "pwfile=", "kbhfile="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -882,6 +948,9 @@ def main():
         elif o in ("-n", "--dryrun"):
             dryrun = True
 
+        elif o in ("-f", "--force"):
+            force = True
+
         elif o in ("-h", "--help"):
             usage()
             sys.exit()
@@ -907,7 +976,7 @@ def main():
             assert False, "unhandled option"
 
     if (username and password):
-        session = Session(username, password, readonly=dryrun)
+        session = Session(username, password, readonly=dryrun, force=force)
 
     if (kbhFile):
         kbh = KleinerBrauhelfer(kbhFile)

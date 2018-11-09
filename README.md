@@ -61,37 +61,49 @@ welcome. But please do not expect things to work without any problems.
 
 ```
 $ ./Grainfather.py -h
-Usage: ./Grainfather.py [options]
+Usage: ./Grainfather.py [options] [command [argument] ]
   -v           --verbose             increase the logging level
-  -d           --debug               set to maximum logging level
+  -d           --debug               run at maximum debug level
+  -n           --dryrun              do not write any data
+  -f           --force               force operations
   -h           --help                this help message
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
   -P file      --pwfile file         read password from file
   -k file      --kbhfile file        Kleiner Brauhelfer database file
+Commands:
+  list                               list user's recipes
+  dump ["namepattern"]               dump user's recipes 
+  push ["namepattern"]               push recipes from KBH to GF
+  delete "namepattern"               delete user's recipes
 
-$ ./Grainfather.py -v -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite push "#004 Altbier"
+$ ./Grainfather.py -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite push "#004 Altbier"
 INFO:session:GET https://oauth.grainfather.com/customer/account/login/ -> 200
 INFO:session:POST https://oauth.grainfather.com/customer/account/loginPost/ -> 200
 INFO:session:GET https://brew.grainfather.com -> 200
 INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=1 -> 200
 INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=2 -> 200
-INFO:interpreter:Updating <bound Recipe id 181607 named "#004 Altbier">
+INFO:interpreter:Updating <current Recipe id 181607 named "#004 Altbier">
 INFO:session:PUT https://brew.grainfather.com/recipes/181607 -> 200
 INFO:session:GET https://brew.grainfather.com/logout -> 200
 ```
 
 ### TODO
 
+- beatify list output format (sort, more columns)
+- configuration file (user id, password file, kbh file)
 - implement recipe["fermentation_steps"]
-- more operations: delete (rename? ...others?)
-- better error handling
 - document KBH [[]]-tags
-- implement more KBH [[]]-tags (e.g. malt-ppg)
-- split: Python API / command line tool
+- more operations: rename? ...others?
 - allow a separator to suppress parts of KBH comments
 - daemon mode, listening for database updates in the background
+- persistent sessions for faster subsequent commands -> new command "logout"
+- implement more KBH [[]]-tags (e.g. malt-ppg)
+- local log file of write operations
+- maybe, a "restore" command would be possible?
+- better error handling
 
+- split: Python API / command line tool
 - handle ratings somehow?
 - (partial) sync back from GF to KBH?
 
