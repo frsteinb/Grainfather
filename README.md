@@ -1,35 +1,34 @@
-
 # Grainfather.py
 
-## A tool for syncing brew recipes from "Kleiner Brauhelfer" to the
-   Grainfather brew community database
+## A tool for syncing brew recipes from "Kleiner Brauhelfer" to the Grainfather brew community database
 
 ### Introduction
 
-The Grainfather company produces home brewing equipment all over the
+The [Grainfather company][1] produces home brewing equipment and
+sells it to customers all over the
 world. With relatively affordable as well as high quality products
 many home brewers love their shiny stainless steel Grainfather
-equipment. :-) Brew recipes can be managed on a Grainfather community
-web site and kept snychronized with iOS and Android apps on
+equipment. :-) Brew recipes can be managed on the [Grainfather community
+web site][2] and kept snychronized with iOS and Android apps on
 smartphones and tablet computers. While this recipe management is not
-necessarily specific to Grainfather brewing hardware, a specific
-benefit of such a combination is that the apps can easily control
-brewing from water heating water, over precise mash steps profiles,
+necessarily limited to Grainfather brewing hardware, a specific
+benefit of such a combination is that the app can easily control
+the brewing process from water heating, over precise mash step profiles,
 up to the boil with various boil addition alarms.
 
-The "Kleiner Brauhelfer" is an open source software for brew recipe
-development and management. It is widely used amoung home brewers in
-Germany for some time. Therefore many brewers have lots of recipes
+The [Kleiner Brauhelfer][3] (KBH) is an open source software for brew recipe
+development and management. It is widely used among home brewers in
+Germany for many years. Therefore many brewers have lots of recipes
 and according brew session data stored in their "KBH" database. Many
 of them do not want to use another management software, when they
-replaced their brewing equipment by a Grainfather.
+recently replaced their brewing equipment by a Grainfather.
 
 The aim of this project is to transfer and synchronize recipes
 from a personal KBH database to the Grainfather site.
 
 ### License
 
-See LICENSE.txt
+See [LICENSE.txt][4]
 
 ### Prerequisites
 
@@ -58,8 +57,9 @@ problems.
 
 ### Usage Example
 
+```
 $ ./Grainfather.py -h
-./Grainfather.py [options]
+Usage: ./Grainfather.py [options]
   -v           --verbose             increase the logging level
   -d           --debug               set to maximum logging level
   -h           --help                this help message
@@ -68,7 +68,8 @@ $ ./Grainfather.py -h
   -P file      --pwfile file         read password from file
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 
-$ ./Grainfather.py -v -u "f-grainfather@familie-steinberg.org" -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite
+$ ./Grainfather.py -v -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite
+```
 
 ### TODO
 
@@ -86,3 +87,12 @@ Late future:
 
 - ratings
 - (partial) sync back from GF to KBH?
+
+
+[1]: https://grainfather.com
+[2]: https://brew.grainfather.com
+[3]: https://github.com/Gremmel/kleiner-brauhelfer
+[4]: LICENSE.txt
+
+
+
