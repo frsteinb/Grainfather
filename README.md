@@ -36,8 +36,8 @@ See [LICENSE.txt][4]
 
 This software is being developed and used on current Linux systems as
 of 2018. It is implemented in Python 3.x. You will need the "requests"
-package[5], e.g. the Debian package "python3-requests" on Ubuntu or
-Debian systems.
+and "dateutil" packages, e.g. the Debian packages "python3-requests"
+and "python3-dateutil" on Ubuntu or Debian systems.
 
 Of course you need KBH. The system running this software just has to
 have access to the SQLite3 database file of KBH. E.g., I run KBH on a
