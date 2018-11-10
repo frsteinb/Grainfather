@@ -840,6 +840,8 @@ class Interpreter(object):
 
         recipes = self.session.getMyRecipes(namepattern)
 
+        recipes = sorted(recipes, key = lambda r: r.get("name"))
+
         for recipe in recipes:
             
             #print(recipe)
