@@ -24,14 +24,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
 import os
 import re
 import sys
-import time
 import json
 import getopt
 import fnmatch
 import logging
 import sqlite3
 import requests
+import time
 import datetime
+import dateutil
+import dateutil.tz
 import http.client
 from enum import Enum
 
@@ -122,8 +124,6 @@ class KleinerBrauhelfer(object):
         data["og"] = Session.platoToGravity(sud["SWAnstellen"])
         data["fg"] = Session.platoToGravity(restextrakt)
 
-        srm = round(float(sud["erg_Farbe"]) * 0.508)
-
         # formula from https://brauerei.mueggelland.de/vergaerungsgrad.html
         stammwuerze = float(sud["SWAnstellen"])
         wfg = 0.1808 * stammwuerze + 0.1892 * restextrakt;
@@ -140,11 +140,12 @@ class KleinerBrauhelfer(object):
         data["description"] = sud["Kommentar"].splitlines()[0]
         data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0))
         data["ibu"] = sud["IBU"]
+        data["bggu"] = float(data["ibu"]) / (float(data["og"]) - 1.0) / 1000
         data["is_active"] = True # what is this?
         if sud["JungbiermengeAbfuellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
             data["losses"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["JungbiermengeAbfuellen"]))
         data["notes"] = re.sub(r'\[\[[^\]]*\]\]\n?', r'', sud["Kommentar"])
-        data["srm"] = srm
+        data["srm"] = round(float(sud["erg_Farbe"]) * 0.508)
         data["bjcp_style_id"] = self.extractFromText(sud["Kommentar"], "BJCP-Style")
         data["is_public"] = self.extractFromText(sud["Kommentar"], "Public", default=False)
         data["image_url"] = self.extractFromText(sud["Kommentar"], "Image")
@@ -182,33 +183,9 @@ class KleinerBrauhelfer(object):
                     "fermentable_id": None,
                     "amount": float("%.3f" % (zutat["erg_Menge"] / 1000)) })
 
-        # adjuncts
-        data["adjuncts"] = []
-        c.execute("SELECT * FROM WeitereZutatenGaben WHERE SudID = ? AND Typ != 100 AND Ausbeute <= 0 ORDER BY erg_Menge DESC", (sud["ID"],))
-        zutaten = c.fetchall()
-        for zutat in zutaten:
-            if zutat["Zeitpunkt"] == 2:
-                usage = AdjunctUsageType.MASH.value
-            elif zutat["Zeitpunkt"] == 1:
-                if zutat["Zugabedauer"] == 0:
-                    usage = AdjunctUsageType.FLAMEOUT.value
-                else:
-                    usage = AdjunctUsageType.BOIL.value
-            elif zutat["Zeitpunkt"] == 0:
-                usage = AdjunctUsageType.PRIMARY.value
-            data["adjuncts"].append({
-                    "name": zutat["Name"],
-                    "adjunct_usage_type_id": usage,
-                    "unit": "g",
-                    "amount": float("%.3f" % (zutat["erg_Menge"])) })
-            if zutat["Zugabedauer"] > 0:
-                t = zutat["Zugabedauer"]
-                if t >= 1440:
-                    t = round(t / 1440)
-                data["adjuncts"][-1]["time"] = t
-
         # hops
         data["hops"] = []
+        # first wort
         c.execute("SELECT * FROM HopfenGaben WHERE SudID = ? AND Vorderwuerze = 1 ORDER BY erg_Menge DESC", (sud["ID"],))
         diehopfen = c.fetchall()
         for hopfen in diehopfen:
@@ -223,6 +200,7 @@ class KleinerBrauhelfer(object):
                     "hop_usage_type_id": HopUsageType.FIRSTWORT.value,
                     "time": data["boil_time"],
                     "amount": float("%.3f" % (hopfen["erg_Menge"])) })
+        # boil and hopstand
         c.execute("SELECT * FROM HopfenGaben WHERE SudID = ? AND Vorderwuerze = 0 ORDER BY Zeit DESC", (sud["ID"],))
         diehopfen = c.fetchall()
         for hopfen in diehopfen:
@@ -246,7 +224,8 @@ class KleinerBrauhelfer(object):
                     "hop_type_id": typeid,
                     "hop_usage_type_id": usage,
                     "amount": float("%.3f" % (hopfen["erg_Menge"])) })
-        c.execute("SELECT * FROM WeitereZutatenGaben WHERE SudID = ? AND Typ = 100 AND Zeitpunkt = 0 ORDER BY erg_Menge DESC", (sud["ID"],))
+        # dry hop
+        c.execute("SELECT * FROM WeitereZutatenGaben WHERE SudID = ? AND ( Typ = 100 OR Typ = -1 ) AND Zeitpunkt = 0 ORDER BY erg_Menge DESC", (sud["ID"],))
         zutaten = c.fetchall()
         for zutat in zutaten:
             c.execute("SELECT * FROM Hopfen WHERE Beschreibung = ?", (zutat["Name"],))
@@ -275,19 +254,6 @@ class KleinerBrauhelfer(object):
             else:
                 data["hops"][-1]["time"] = 0
 
-        # mash steps
-        data["mash_steps"] = []
-        i = 0
-        c.execute("SELECT * FROM Rasten WHERE SudID = ?", (sud["ID"],))
-        rasten = c.fetchall()
-        for rast in rasten:
-            data["mash_steps"].append({
-                    "order": i,
-                    "name": rast["RastName"],
-                    "temperature": rast["RastTemp"],
-                    "time": rast["RastDauer"] })
-            i += 1
-
         # kbh supports only one yeast in a recipe
         if sud["HefeAnzahlEinheiten"] == 0:
             data["yeasts"] = []
@@ -310,7 +276,46 @@ class KleinerBrauhelfer(object):
                 except:
                     self.logger.debug("could not convert Hefe Verpackungsmenge \"%s\" to amount and unit" % (hefe["Verpackungsmenge"]))
                 
-        data["bggu"] = float(data["ibu"]) / (float(data["og"]) - 1.0) / 1000
+        # adjuncts
+        data["adjuncts"] = []
+        c.execute("SELECT * FROM WeitereZutatenGaben WHERE SudID = ? AND Typ != 100 AND Typ != -1 AND Ausbeute <= 0 ORDER BY erg_Menge DESC", (sud["ID"],))
+        zutaten = c.fetchall()
+        for zutat in zutaten:
+            if zutat["Zeitpunkt"] == 2:
+                usage = AdjunctUsageType.MASH.value
+            elif zutat["Zeitpunkt"] == 1:
+                if zutat["Zugabedauer"] == 0:
+                    usage = AdjunctUsageType.FLAMEOUT.value
+                else:
+                    usage = AdjunctUsageType.BOIL.value
+            elif zutat["Zeitpunkt"] == 0:
+                usage = AdjunctUsageType.PRIMARY.value
+            data["adjuncts"].append({
+                    "name": zutat["Name"],
+                    "adjunct_usage_type_id": usage,
+                    "unit": "g",
+                    "amount": float("%.3f" % (zutat["erg_Menge"])) })
+            if zutat["Zugabedauer"] > 0:
+                t = zutat["Zugabedauer"]
+                if t >= 1440:
+                    t = round(t / 1440)
+                data["adjuncts"][-1]["time"] = t
+
+        # mash steps
+        data["fermentation_steps"] = []
+        i = 0
+        days = 10
+        temp = 18
+        # XXX: fetch days from KBH Gärverlauf, or Sud dates alternatively
+        # XXX: fetch temp from KBH Gärverlauf, or KBH Hefe alternatively
+        data["fermentation_steps"].append({
+                "order": i,
+                "name": "Hauptgärung",
+                "temperature": temp,
+                "time": days })
+        i += 1
+
+        # fermentation steps
 
         return Recipe(data=data)
 
@@ -368,6 +373,17 @@ class Session(object):
     metadata = None
     logger = None
     readonly = False
+
+
+
+    def utcToLocal(self, t):
+
+        utc = datetime.datetime.strptime(t[:19], '%Y-%m-%dT%H:%M:%S')
+        utc = utc.replace(tzinfo=dateutil.tz.tzutc())
+        local = utc.astimezone(dateutil.tz.tzlocal())
+        s = local.isoformat(sep=" ")
+
+        return s
 
 
 
@@ -490,8 +506,8 @@ class Session(object):
 
     def register(self, obj, id=None):
 
-        """If the given object has been defined locally and is not yet bound to
-        a Grainfather session, this method will bind it without actually saving
+        """If the given object has been defined locally and is not yet registered to
+        a Grainfather session, this method will register it without actually saving
         it to the Grainfather site. Saving can be done by a subsequent save() call
         on the object."""
 
@@ -501,7 +517,7 @@ class Session(object):
         if obj.session == None:
             obj.session = self
         else:
-            self.logger.error("%s is already bound to a session" % obj)
+            self.logger.error("%s is already registered to a session" % obj)
 
 
 
@@ -529,12 +545,9 @@ class Session(object):
             responsedata = json.loads(response.text)
 
             for data in responsedata["data"]:
-                if full:
-                    recipes.append(self.getRecipe(id=data["id"]))
-                else:
-                    recipe = Recipe(data=data)
-                    recipe.session = self
-                    recipes.append(recipe)
+                recipe = Recipe(data=data)
+                self.register(recipe)
+                recipes.append(recipe)
                     
             if "next_page_url" in responsedata:
                 url = responsedata["next_page_url"]
@@ -543,6 +556,10 @@ class Session(object):
 
         if namepattern:
             recipes = list(filter(lambda r: fnmatch.fnmatch(r.get("name"), namepattern), recipes))
+
+        if full:
+            for recipe in recipes:
+                recipe.reload()
 
         return recipes
 
@@ -656,7 +673,7 @@ class Object(object):
 
         self.tidy()
 
-        if "id" in self.data:
+        if self.isBound():
             response = self.session.put(self.urlsave.format(api_token=self.session.metadata["user"]["api_token"], id=self.data["id"]), json=self.data)
         else:
             response = self.session.post(self.urlcreate.format(api_token=self.session.metadata["user"]["api_token"]), json=self.data)
@@ -679,9 +696,9 @@ class Object(object):
             s += "%s " % self.data["status"]
         else:
             if self.session:
-                s += "bound "
+                s += "registered "
             else:
-                s += "unbound "
+                s += "unregistered "
         s += "%s" % (self.__class__.__name__)
         if "id" in self.data:
             s += " id %s" % self.data["id"]
@@ -711,7 +728,34 @@ class Object(object):
 
 
 
+    def isBound(self):
+
+        """Checks whether the object has a server-side representation."""
+
+        if "id" in self.data:
+            return True
+        else:
+            return False
+
+
+
+    def isFull(self):
+
+        """Checks whether the object contains all attributes. When
+        false, some attributes may be missing, which happens for
+        search results, for example."""
+
+        if "fermentables" in self.data:
+            return True
+        else:
+            return False
+
+
+
     def print(self):
+
+        if self.isBound() and (not self.isFull()):
+            self.reload()
 
         print(json.dumps(self.data, sort_keys=True, indent=4))
 
@@ -783,27 +827,43 @@ class Interpreter(object):
 
 
 
-    def list(self, namepattern=None):
+    def list(self, args):
 
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
+
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            namepattern = "*"
 
         recipes = self.session.getMyRecipes(namepattern)
 
         for recipe in recipes:
             
-            print(recipe)
+            #print(recipe)
+            print("%7d %s %s %7s %s" % (recipe.get("id"),
+                                    "p" if recipe.get("is_public") else "-",
+                                    self.session.utcToLocal(recipe.get("updated_at"))[:16],
+                                    "%.1f" % recipe.get("batch_size") + 
+                                    "l" if recipe.get("unit_type_id") == 10 else "gal",
+                                    recipe.get("name")))
 
 
 
-    def dump(self, namepattern=None):
+    def dump(self, args):
 
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
-        recipes = self.session.getMyRecipes(namepattern)
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            namepattern = "*"
+
+        recipes = self.session.getMyRecipes(namepattern, full=True)
 
         for recipe in recipes:
             
@@ -811,13 +871,15 @@ class Interpreter(object):
 
 
 
-    def delete(self, namepattern=None):
+    def delete(self, args):
         
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
-        if not namepattern:
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
             self.logger.error("No name pattern supplied")
             return
 
@@ -829,7 +891,7 @@ class Interpreter(object):
             
 
 
-    def push(self, namepattern=None):
+    def push(self, args):
         
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
@@ -839,7 +901,9 @@ class Interpreter(object):
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
-        if not namepattern:
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
             namepattern = "*"
 
         recipes = self.kbh.getRecipes(namepattern.replace("*", "%"))
@@ -875,7 +939,7 @@ class Interpreter(object):
             
 
 
-    def pull(namepattern):
+    def pull(args):
 
         return
 
@@ -987,10 +1051,8 @@ def main():
     arg = None
     if len(args) >= 1:
         op = args[0]
-    if len(args) >= 2:
-        arg = args[1]
 
-    result = getattr(interpreter, op)(arg)
+    result = getattr(interpreter, op)(args[1:])
 
     if session:
         session.logout()
