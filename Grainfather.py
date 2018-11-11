@@ -30,10 +30,12 @@ import fnmatch
 import logging
 import sqlite3
 import requests
+import tempfile
 import time
 import datetime
 import dateutil
 import dateutil.tz
+import subprocess
 import http.client
 from enum import Enum
 
@@ -302,6 +304,19 @@ class KleinerBrauhelfer(object):
                 data["adjuncts"][-1]["time"] = t
 
         # mash steps
+        data["mash_steps"] = []
+        i = 0
+        c.execute("SELECT * FROM Rasten WHERE SudID = ?", (sud["ID"],))
+        rasten = c.fetchall()
+        for rast in rasten:
+            data["mash_steps"].append({
+                    "order": i,
+                    "name": rast["RastName"],
+                    "temperature": rast["RastTemp"],
+                    "time": rast["RastDauer"] })
+            i += 1
+
+        # fermentation steps
         data["fermentation_steps"] = []
         i = 0
         days = 10
@@ -325,6 +340,8 @@ class KleinerBrauhelfer(object):
 
         """Retrieves a array of Recipe objects from the KBH database based on
         an optional SQL name pattern (use e.g. % as a wildcard)."""
+
+        namepattern = namepattern.replace("*", "%")
 
         c = self.conn.cursor()
         c.execute("SELECT * FROM Sud WHERE Sudname LIKE ?", (namepattern,))
@@ -562,6 +579,22 @@ class Session(object):
                 recipe.reload()
 
         return recipes
+
+
+
+    def getMyRecipe(self, namepattern=None, full=True):
+
+        recipes = self.getMyRecipes(namepattern, full=full)
+
+        if len(recipes) == 0:
+            self.logger.warn("pattern did not result in any entry")
+            return None
+
+        if len(recipes) > 1:
+            self.logger.warn("pattern did not result in a unique entry")
+            return None
+
+        return recipes[0]
 
 
 
@@ -844,7 +877,6 @@ class Interpreter(object):
 
         for recipe in recipes:
             
-            #print(recipe)
             print("%7d %s %s %7s %s" % (recipe.get("id"),
                                     "p" if recipe.get("is_public") else "-",
                                     self.session.utcToLocal(recipe.get("updated_at"))[:16],
@@ -871,6 +903,45 @@ class Interpreter(object):
             
             recipe.print()
 
+
+
+    def diff(self, args):
+
+        if not self.kbh:
+            self.logger.error("No KBH database, use -k option")
+            return
+            
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            self.logger.error("No name supplied")
+            return
+
+        kbh_recipe = self.kbh.getRecipe(namepattern)
+        gf_recipe = self.session.getMyRecipe(namepattern)
+
+        if kbh_recipe and gf_recipe:
+        
+            kbh_file = tempfile.NamedTemporaryFile(delete=False)
+            kbh_file.write(str.encode(json.dumps(kbh_recipe.data, sort_keys=True, indent=4)))
+            kbh_file.flush()
+            kbh_file.seek(0)
+
+            gf_file = tempfile.NamedTemporaryFile(delete=False)
+            gf_file.write(str.encode(json.dumps(gf_recipe.data, sort_keys=True, indent=4)))
+            gf_file.flush()
+            gf_file.seek(0)
+
+            subprocess.call(['diff', '-u', kbh_file.name, gf_file.name])
+
+            kbh_file.close()
+            gf_file.close()
+            os.unlink(kbh_file.name)
+            os.unlink(gf_file.name)
 
 
     def delete(self, args):
@@ -908,36 +979,36 @@ class Interpreter(object):
         else:
             namepattern = "*"
 
-        recipes = self.kbh.getRecipes(namepattern.replace("*", "%"))
-        if len(recipes) == 0:
+        kbh_recipes = self.kbh.getRecipes(namepattern)
+        if len(kbh_recipes) == 0:
             return
 
         # we have to know all our recipes on the GF server so that
         # we can decide which recipe to create and which to update
         gf_recipes = self.session.getMyRecipes()
 
-        for recipe in recipes:
+        for kbh_recipe in kbh_recipes:
             
             # try to find matching GF recipe
             id = None
             for gf_recipe in gf_recipes:
                 #print("XXX %s %s" % (gf_recipe.get("name"), gf_recipe.get("updated_at")))
-                if gf_recipe.get("name") == recipe.get("name"):
+                if gf_recipe.get("name") == kbh_recipe.get("name"):
                     id = gf_recipe.get("id")
                     break
             if id:
-                if (gf_recipe.get("updated_at") > recipe.get("updated_at")) and (not self.session.force):
+                if (gf_recipe.get("updated_at") > kbh_recipe.get("updated_at")) and (not self.session.force):
                     self.logger.info("%s needs no update" % gf_recipe)
-                    self.logger.debug("kbh:%s, gf:%s" % (recipe.get("updated_at"), gf_recipe.get("updated_at")))
+                    self.logger.debug("kbh:%s, gf:%s" % (kbh_recipe.get("updated_at"), gf_recipe.get("updated_at")))
                 else:
-                    self.session.register(recipe, id=id)
+                    self.session.register(kbh_recipe, id=id)
                     self.logger.info("Updating %s" % gf_recipe)
-                    self.logger.debug("kbh:%s, gf:%s" % (recipe.get("updated_at"), gf_recipe.get("updated_at")))
-                    recipe.save()
+                    self.logger.debug("kbh:%s, gf:%s" % (kbh_recipe.get("updated_at"), gf_recipe.get("updated_at")))
+                    kbh_recipe.save()
             else:
-                self.logger.info("Creating %s" % recipe)
-                self.session.register(recipe)
-                recipe.save()
+                self.logger.info("Creating %s" % kbh_recipe)
+                self.session.register(kbh_recipe)
+                kbh_recipe.save()
             
 
 
@@ -962,7 +1033,8 @@ Commands:
   list                               list user's recipes
   dump ["namepattern"]               dump user's recipes 
   push ["namepattern"]               push recipes from KBH to GF
-  delete "namepattern"               delete user's recipes""" % sys.argv[0])
+  delete "namepattern"               delete user's recipes
+  diff "namepattern"                 show json diff between kbh and gf version of a recipe""" % sys.argv[0])
 
 
 def main():
