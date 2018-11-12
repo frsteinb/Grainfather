@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import json
+import errno
 import getopt
 import fnmatch
 import logging
@@ -1037,14 +1038,26 @@ Commands:
   diff "namepattern"                 show json diff between kbh and gf version of a recipe""" % sys.argv[0])
 
 
+
+def mergeConfig(config, filename, notify=True):
+
+    try:
+        with open(os.path.expanduser(filename)) as f:
+            data = json.load(f)
+            config = {**config, **data}
+    except Exception as error:
+        if notify or (errno.errorcode[error.errno] != "ENOENT"):
+            logging.getLogger().warn("Could not read configuration from %s: %s" % (filename, error))
+    
+    return config
+
+
+
 def main():
 
-    username = None
-    password = None
     level = None
     session = None
     kbh = None
-    kbhFile = None
     dryrun = False
     force = False
 
@@ -1054,10 +1067,24 @@ def main():
     requests_log = logging.getLogger("requests.packages.urllib3")
     requests_log.setLevel(logging.WARN)
 
+    config = dict(
+        globalConfigFile = "/ibr/local/etc/grainfather.config",
+        configFile = "~/.grainfather.config",
+        passwordFile = "~/.grainfather.password",
+        historyFile = "~/.grainfather.history",
+        logFile = "~/.grainfather.log",
+        username = None,
+        password = None,
+        kbhFile = "~/.kleiner-brauhelfer/kb_daten.sqlite"
+        )
+    
+    config = mergeConfig(config, config["globalConfigFile"], notify=False)
+    config = mergeConfig(config, config["configFile"], notify=False)
+
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdnfhu:p:P:k:",
-                                   ["verbose", "debug", "dryrun", "force", "help", "user=", "password=", "pwfile=", "kbhfile="])
+                                   "vdnfhc:u:p:P:k:",
+                                   ["verbose", "debug", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "kbhfile="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -1093,31 +1120,39 @@ def main():
             usage()
             sys.exit()
 
+        elif o in ("-c", "--config"):
+            config = mergeConfig(config, a, notify=True)
+
         elif o in ("-u", "--user"):
-            username = a
+            config["username"] = a
 
         elif o in ("-p", "--password"):
-            password = a
+            config["password"] = a
 
         elif o in ("-P", "--pwfile"):
-            try:
-                with open(a) as f:
-                    password = f.readline()
-                    password = password.rstrip('\r\n')
-            except Exception as error:
-                logging.getLogger().error("Could not read password from file: %s" % (error))
+            config["passwordFile"] = a
 
         elif o in ("-k", "--kbhfile"):
-            kbhFile = a
+            config["kbhFile"] = a
 
         else:
             assert False, "unhandled option"
 
-    if (username and password):
-        session = Session(username, password, readonly=dryrun, force=force)
+    print(config)
 
-    if (kbhFile):
-        kbh = KleinerBrauhelfer(kbhFile)
+    if "passwordFile" in config:
+        try:
+            with open(os.path.expanduser(config["passwordFile"])) as f:
+                password = f.readline()
+                config["password"] = password.rstrip('\r\n')
+        except Exception as error:
+            logging.getLogger().error("Could not read password from file: %s" % (error))
+
+    if (config["username"] and config["password"]):
+        session = Session(config["username"], config["password"], readonly=dryrun, force=force)
+
+    if (config["kbhFile"]):
+        kbh = KleinerBrauhelfer(os.path.expanduser(config["kbhFile"]))
 
     interpreter = Interpreter(kbh=kbh, session=session)
 
