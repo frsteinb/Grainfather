@@ -945,18 +945,41 @@ class Interpreter(object):
         else:
             namepattern = "*"
 
-        recipes = self.session.getMyRecipes(namepattern)
+        names = []
 
-        recipes = sorted(recipes, key = lambda r: r.get("name"))
+        gf_recipes = self.session.getMyRecipes(namepattern)
+        names.extend(recipe.get("name") for recipe in gf_recipes if recipe.get("name") not in names)
 
-        for recipe in recipes:
+        if self.kbh:
+            kbh_recipes = self.kbh.getRecipes(namepattern)
+            names.extend(recipe.get("name") for recipe in kbh_recipes if recipe.get("name") not in names)
+        else:
+            kbh_recipes = None
+
+        names = sorted(names)
+
+        for name in names:
             
-            print("%7d %s %s %7s %s" % (recipe.get("id"),
-                                    "p" if recipe.get("is_public") else "-",
-                                    self.session.utcToLocal(recipe.get("updated_at"))[:16],
-                                    "%.1f" % recipe.get("batch_size") + 
-                                    "l" if recipe.get("unit_type_id") == 10 else "gal",
-                                    recipe.get("name")))
+            gf_recipe  = next((recipe for recipe in gf_recipes  if recipe.get("name") == name), None)
+            if kbh_recipes:
+                kbh_recipe = next((recipe for recipe in kbh_recipes if recipe.get("name") == name), None)
+            else:
+                kbh_recipe = None
+
+            recipe = gf_recipe if gf_recipe else kbh_recipe
+
+            print("%8s %s%s%s%s %16s %16s %7s %s" %
+                  (gf_recipe.get("id") if gf_recipe else "-",
+                   "k" if kbh_recipe else "-",
+                   "g" if gf_recipe else "-",
+                   "p" if gf_recipe and gf_recipe.get("is_public") else "-",
+                   "o" if gf_recipe and kbh_recipe and kbh_recipe.get("updated_at") > gf_recipe.get("updated_at") else "-",
+
+                   self.session.utcToLocal(kbh_recipe.get("updated_at"))[:16] if kbh_recipe else "-",
+                   self.session.utcToLocal(gf_recipe.get("updated_at"))[:16] if gf_recipe else "-",
+
+                   "%.1f" % (recipe.get("batch_size")) + "l" if recipe.get("unit_type_id") == 10 else "gal",
+                   name))
 
 
 
@@ -977,65 +1000,6 @@ class Interpreter(object):
             
             recipe.print()
 
-
-
-    def diff(self, args):
-
-        if not self.kbh:
-            self.logger.error("No KBH database, use -k option")
-            return
-            
-        if not self.session:
-            self.logger.error("No Grainfather session, use -u and -p/-P options")
-            return
-
-        if len(args) >= 1:
-            namepattern = args[0]
-        else:
-            self.logger.error("No name supplied")
-            return
-
-        kbh_recipe = self.kbh.getRecipe(namepattern)
-        gf_recipe = self.session.getMyRecipe(namepattern)
-
-        if kbh_recipe and gf_recipe:
-        
-            kbh_file = tempfile.NamedTemporaryFile(delete=False)
-            kbh_file.write(str.encode(json.dumps(kbh_recipe.data, sort_keys=True, indent=4)))
-            kbh_file.flush()
-            kbh_file.seek(0)
-
-            gf_file = tempfile.NamedTemporaryFile(delete=False)
-            gf_file.write(str.encode(json.dumps(gf_recipe.data, sort_keys=True, indent=4)))
-            gf_file.flush()
-            gf_file.seek(0)
-
-            subprocess.call(['diff', '-u', kbh_file.name, gf_file.name])
-
-            kbh_file.close()
-            gf_file.close()
-            os.unlink(kbh_file.name)
-            os.unlink(gf_file.name)
-
-
-    def delete(self, args):
-        
-        if not self.session:
-            self.logger.error("No Grainfather session, use -u and -p/-P options")
-            return
-
-        if len(args) >= 1:
-            namepattern = args[0]
-        else:
-            self.logger.error("No name pattern supplied")
-            return
-
-        recipes = self.session.getMyRecipes(namepattern)
-
-        for recipe in recipes:
-            
-            recipe.delete()
-            
 
 
     def push(self, args):
@@ -1086,9 +1050,63 @@ class Interpreter(object):
             
 
 
-    def pull(self, args):
+    def delete(self, args):
+        
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
 
-        return
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            self.logger.error("No name pattern supplied")
+            return
+
+        recipes = self.session.getMyRecipes(namepattern)
+
+        for recipe in recipes:
+            
+            recipe.delete()
+            
+
+
+    def diff(self, args):
+
+        if not self.kbh:
+            self.logger.error("No KBH database, use -k option")
+            return
+            
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            self.logger.error("No name supplied")
+            return
+
+        kbh_recipe = self.kbh.getRecipe(namepattern)
+        gf_recipe = self.session.getMyRecipe(namepattern)
+
+        if kbh_recipe and gf_recipe:
+        
+            kbh_file = tempfile.NamedTemporaryFile(delete=False)
+            kbh_file.write(str.encode(json.dumps(kbh_recipe.data, sort_keys=True, indent=4)))
+            kbh_file.flush()
+            kbh_file.seek(0)
+
+            gf_file = tempfile.NamedTemporaryFile(delete=False)
+            gf_file.write(str.encode(json.dumps(gf_recipe.data, sort_keys=True, indent=4)))
+            gf_file.flush()
+            gf_file.seek(0)
+
+            subprocess.call(['diff', '-u', kbh_file.name, gf_file.name])
+
+            kbh_file.close()
+            gf_file.close()
+            os.unlink(kbh_file.name)
+            os.unlink(gf_file.name)
 
 
 
@@ -1116,8 +1134,8 @@ Commands:
   dump ["namepattern"]               dump user's recipes 
   push ["namepattern"]               push recipes from KBH to GF
   delete "namepattern"               delete user's recipes
-  diff "namepattern"                 show json diff between kbh and gf version of a recipe""" % sys.argv[0])
-
+  diff "namepattern"                 show json diff between kbh and gf version of a recipe
+  logout                             logout and invalidate persistent session""" % sys.argv[0])
 
 
 def mergeConfig(config, filename, notify=True):
@@ -1244,8 +1262,7 @@ def main():
     arg = None
     if len(args) >= 1:
         op = args[0]
-
-    result = getattr(interpreter, op)(args[1:])
+        result = getattr(interpreter, op)(args[1:])
 
     if logout:
         session.logout()
