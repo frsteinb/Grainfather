@@ -27,9 +27,11 @@ import sys
 import json
 import errno
 import getopt
+import pickle
 import fnmatch
 import logging
 import sqlite3
+import base64
 import requests
 import tempfile
 import time
@@ -376,12 +378,6 @@ class KleinerBrauhelfer(object):
 
 
 
-class SessionError(Exception):
-
-    """Raised when a Grainfather session error occurs."""
-
-
-
 class Session(object):
 
     """Representation of a user session on the Grainfather brew community database."""
@@ -391,6 +387,8 @@ class Session(object):
     metadata = None
     logger = None
     readonly = False
+    headers = {}
+    cookies = None
 
 
 
@@ -432,19 +430,31 @@ class Session(object):
 
 
 
-    def get(self, url):
+    def get(self, url, relogin=True):
 
-        response = self.session.get(url)
+        response = self.session.get(url, headers=self.headers, cookies=self.cookies, allow_redirects=False)
         self.logger.info("GET %s -> %s" % (url, response.status_code))
+        if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+            if relogin:
+                # if the response seems to be the login page
+                self.login()
+            response = self.session.get(url, headers=self.headers, cookies=self.cookies)
+            self.logger.info("GET %s -> %s" % (url, response.status_code))
         return response
 
 
 
-    def post(self, url, data=None, json=None, files=None, force=False):
+    def post(self, url, data=None, json=None, files=None, force=False, relogin=True):
 
         if (self.readonly == False) or force:
-            response = self.session.post(url, data=data, json=json, files=files)
+            response = self.session.post(url, headers=self.headers, cookies=self.cookies, data=data, json=json, files=files, allow_redirects=False)
             self.logger.info("POST %s -> %s" % (url, response.status_code))
+            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+                if relogin:
+                    # if the response seems to be the login page
+                    self.login()
+                response = self.session.post(url, headers=self.headers, cookies=self.cookies, data=data, json=json, files=files)
+                self.logger.info("POST %s -> %s" % (url, response.status_code))
         else:
             self.logger.info("POST %s (dryrun)" % (url))
             response = None
@@ -452,11 +462,17 @@ class Session(object):
 
 
 
-    def put(self, url, data=None, json=None, force=False):
+    def put(self, url, data=None, json=None, force=False, relogin=True):
 
         if (self.readonly == False) or force:
-            response = self.session.put(url, data=data, json=json)
+            response = self.session.put(url, headers=self.headers, cookies=self.cookies, data=data, json=json, allow_redirects=False)
             self.logger.info("PUT %s -> %s" % (url, response.status_code))
+            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+                if relogin:
+                    # if the response seems to be the login page
+                    self.login()
+                response = self.session.put(url, headers=self.headers, cookies=self.cookies, data=data, json=json)
+                self.logger.info("PUT %s -> %s" % (url, response.status_code))
         else:
             self.logger.info("PUT %s (dryrun)" % (url))
             response = None
@@ -464,11 +480,17 @@ class Session(object):
 
 
 
-    def delete(self, url, force=False):
+    def delete(self, url, force=False, relogin=True):
 
         if (self.readonly == False) or force:
-            response = self.session.delete(url)
+            response = self.session.delete(url, headers=self.headers, cookies=self.cookies, allow_redirects=False)
             self.logger.info("DELETE %s -> %s" % (url, response.status_code))
+            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+                if relogin:
+                    # if the response seems to be the login page
+                    self.login()
+                response = self.session.delete(url, headers=self.headers, cookies=self.cookies)
+                self.logger.info("DELETE %s -> %s" % (url, response.status_code))
         else:
             self.logger.info("DELETE %s (dryrun)" % (url))
             response = None
@@ -476,49 +498,100 @@ class Session(object):
 
 
 
-    def __init__(self, username=None, password=None, readonly=False, force=False):
+    def saveState(self, response):
+        
+        # save session information persistently for subsequent program calls
+        state = dict(
+            username = self.username,
+            metadata = self.metadata,
+            cookies = response.cookies.get_dict()
+            )
+        with open(os.path.expanduser(self.stateFile), "w") as f:
+            json.dump(state, f, sort_keys=True, indent=4)
+        self.logger.info("Saved session state to %s" % (self.stateFile))
 
-        self.session = requests.session()
+
+    def loadState(self):
+
+        try:
+            f = open(os.path.expanduser(self.stateFile))
+            state = json.load(f)
+            f.close()
+            self.username = state["username"]
+            self.metadata = state["metadata"]
+            self.headers.update({'X-CSRF-TOKEN': self.metadata["csrfToken"]})
+            self.cookies = state["cookies"]
+            self.logger.info("Read session state from %s" % (self.stateFile))
+        except Exception as error:
+            logging.getLogger().debug("No valid session state found at %s: %s" % (self.stateFile, error))
+
+
+
+    def removeState(self):
+
+        os.remove(os.path.expanduser(self.stateFile))
+        self.logger.info("Removed session state file %s" % (self.stateFile))
+
+
+
+    def __init__(self, username=None, password=None, readonly=False, force=False, stateFile=None):
+
         self.username = username
+        self.password = password
         self.readonly = readonly
         self.force = force
+        self.stateFile = stateFile
 
         self.logger = logging.getLogger('session')
 
-        # fetch the login page
-        response = self.get("https://oauth.grainfather.com/customer/account/login/")
+        self.session = requests.session()
 
-        # pick the form_key from the login form
-        form_key = None
-        for line in response.text.splitlines():
-            if "form_key" in line:
-                form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
-        if (not form_key):
-            self.logger.error("Could not fetch form_key from login page")
+        if self.stateFile:
+            self.loadState()
 
-        # post to the login form
-        payload = {'form_key': form_key, 'login[username]': username, 'login[password]': password}
-        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, force=True)
+        if not self.metadata:
+            self.login()
 
-        # fetch start page from the recipe creator
-        response = self.get("https://brew.grainfather.com")
 
-        # pick session metadata from response and set the CSRF token for this session
-        self.metadata = None
-        for line in response.text.splitlines():
-            if "window.Grainfather" in line:
-                s = re.sub(r'window.Grainfather *= *', r'', line)
-                self.metadata = json.loads(s)
-        if (not self.metadata):
-            self.logger.error("Could not fetch session data from login response")
-        else:
-            self.session.headers.update({'X-CSRF-TOKEN': self.metadata["csrfToken"]})
+
+    def login(self):
+        
+            # fetch the login page
+            response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
+
+            # pick the form_key from the login form
+            form_key = None
+            for line in response.text.splitlines():
+                if "form_key" in line:
+                    form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
+            if (not form_key):
+                self.logger.error("Could not fetch form_key from login page")
+
+            # post to the login form
+            payload = {'form_key': form_key, 'login[username]': self.username, 'login[password]': self.password}
+            response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False)
+
+            # fetch start page from the recipe creator
+            response = self.get("https://brew.grainfather.com", relogin=False)
+
+            # pick session metadata from response and set the CSRF token for this session
+            self.metadata = None
+            for line in response.text.splitlines():
+                if "window.Grainfather" in line:
+                    s = re.sub(r'window.Grainfather *= *', r'', line)
+                    self.metadata = json.loads(s)
+            if (not self.metadata):
+                self.logger.error("Could not fetch session metadata from login response")
+
+            self.saveState(response)
 
 
 
     def logout(self):
 
-        response = self.get("https://brew.grainfather.com/logout")
+        response = self.get("https://brew.grainfather.com/logout", relogin=False)
+
+        self.removeState()
 
 
 
@@ -1013,9 +1086,15 @@ class Interpreter(object):
             
 
 
-    def pull(args):
+    def pull(self, args):
 
         return
+
+
+
+    def logout(self, args):
+
+        self.session.logout()
 
 
 
@@ -1026,9 +1105,11 @@ def usage():
   -n           --dryrun              do not write any data
   -f           --force               force operations
   -h           --help                this help message
+  -c file      --config file         read configuration file
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
   -P file      --pwfile file         read password from file
+  -l           --logout              logout (instead of keeping session persistent)
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
   list                               list user's recipes
@@ -1060,6 +1141,7 @@ def main():
     kbh = None
     dryrun = False
     force = False
+    logout = False
 
     logging.basicConfig()
     level = logging.WARNING
@@ -1072,6 +1154,7 @@ def main():
         configFile = "~/.grainfather.config",
         passwordFile = "~/.grainfather.password",
         historyFile = "~/.grainfather.history",
+        stateFile = "~/.grainfather.state",
         logFile = "~/.grainfather.log",
         username = None,
         password = None,
@@ -1083,8 +1166,8 @@ def main():
 
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdnfhc:u:p:P:k:",
-                                   ["verbose", "debug", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "kbhfile="])
+                                   "vdnfhc:u:p:P:lk:",
+                                   ["verbose", "debug", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "logout", "kbhfile="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -1132,13 +1215,14 @@ def main():
         elif o in ("-P", "--pwfile"):
             config["passwordFile"] = a
 
+        elif o in ("-l", "--logout"):
+            logout = True
+
         elif o in ("-k", "--kbhfile"):
             config["kbhFile"] = a
 
         else:
             assert False, "unhandled option"
-
-    print(config)
 
     if "passwordFile" in config:
         try:
@@ -1148,8 +1232,8 @@ def main():
         except Exception as error:
             logging.getLogger().error("Could not read password from file: %s" % (error))
 
-    if (config["username"] and config["password"]):
-        session = Session(config["username"], config["password"], readonly=dryrun, force=force)
+    session = Session(username=config["username"], password=config["password"],
+                      readonly=dryrun, force=force, stateFile=config["stateFile"])
 
     if (config["kbhFile"]):
         kbh = KleinerBrauhelfer(os.path.expanduser(config["kbhFile"]))
@@ -1163,7 +1247,7 @@ def main():
 
     result = getattr(interpreter, op)(args[1:])
 
-    if session:
+    if logout:
         session.logout()
 
 
