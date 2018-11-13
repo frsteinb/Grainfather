@@ -1138,7 +1138,7 @@ class Interpreter(object):
 
         self.push(args)
 
-        self.logger.info("Now watching %s for changes" % (self.config["kbhFile"]))
+        self.logger.info("Now watching %s for changes..." % (self.config["kbhFile"]))
         mtime = None
         while True:
             stat = os.stat(os.path.expanduser(self.config["kbhFile"]))
