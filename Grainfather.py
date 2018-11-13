@@ -40,6 +40,8 @@ import dateutil
 import dateutil.tz
 import subprocess
 import http.client
+import pyinotify
+import asyncio
 from enum import Enum
 
 
@@ -927,10 +929,11 @@ class Interpreter(object):
     logger = None
 
 
-    def __init__(self, kbh=None, session=None):
+    def __init__(self, kbh=None, session=None, config=None):
 
         self.kbh = kbh
         self.session = session
+        self.config = config
 
         self.logger = logging.getLogger('interpreter')
 
@@ -1112,6 +1115,41 @@ class Interpreter(object):
 
 
 
+    def daemon_handler():
+
+        # wait a moment 
+        sleep(1.0)
+
+        # then sync
+        self.push(args)
+
+
+
+    def daemon(self, args):
+
+
+
+        if not self.kbh:
+            self.logger.error("No KBH database, use -k option")
+            return
+            
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        wm = pyinotify.WatchManager()
+        loop = asyncio.get_event_loop()
+        notifier = pyinotify.AsyncioNotifier(wm, loop, callback=self.daemon_handler)
+        kbhDir = os.path.dirname(os.path.expanduser(self.config["kbhFile"]))
+        wm.add_watch(kbhDir, pyinotify.ALL_EVENTS)
+        self.logger.info("Now watching %s for changes..." % (kbhDir))
+        loop.run_forever()
+        notifier.stop()
+
+        self.push(args)
+
+
+
     def logout(self, args):
 
         self.session.logout()
@@ -1137,6 +1175,7 @@ Commands:
   push ["namepattern"]               push recipes from KBH to GF
   delete "namepattern"               delete user's recipes
   diff "namepattern"                 show json diff between kbh and gf version of a recipe
+  daemon                             run as daemon keeping GF synced with KBH
   logout                             logout and invalidate persistent session""" % sys.argv[0])
 
 
@@ -1258,7 +1297,7 @@ def main():
     if (config["kbhFile"]):
         kbh = KleinerBrauhelfer(os.path.expanduser(config["kbhFile"]))
 
-    interpreter = Interpreter(kbh=kbh, session=session)
+    interpreter = Interpreter(kbh=kbh, session=session, config=config)
 
     op = None
     arg = None
