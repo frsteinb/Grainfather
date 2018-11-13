@@ -745,6 +745,8 @@ class Object(object):
         self.session = session
         self.data  = data
 
+        self.tidy()
+        
         if self.session:
             
             if id:
