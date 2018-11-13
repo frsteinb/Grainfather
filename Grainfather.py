@@ -1136,17 +1136,19 @@ class Interpreter(object):
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
+        self.push(args)
+
         self.logger.info("Now watching %s for changes" % (self.config["kbhFile"]))
         mtime = None
         while True:
             stat = os.stat(os.path.expanduser(self.config["kbhFile"]))
             if mtime and (stat.st_mtime != mtime):
-                time.sleep(3)
+                time.sleep(1)
                 self.logger.info("Detected KBH change, syncing...")
                 self.kbh.reopen()
                 self.push(args)
             mtime = stat.st_mtime
-            time.sleep(5)
+            time.sleep(1)
 
 
 
