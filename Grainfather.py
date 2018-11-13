@@ -1130,7 +1130,7 @@ def usage():
   -l           --logout              logout (instead of keeping session persistent)
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
-  list                               list user's recipes
+  list ["namepattern"]               list user's recipes
   dump ["namepattern"]               dump user's recipes 
   push ["namepattern"]               push recipes from KBH to GF
   delete "namepattern"               delete user's recipes

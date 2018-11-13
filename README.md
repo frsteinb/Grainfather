@@ -72,32 +72,59 @@ Usage: ./Grainfather.py [options] [command [argument] ]
   -P file      --pwfile file         read password from file
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
-  list                               list user's recipes
+  list ["namepattern"]               list user's recipes
   dump ["namepattern"]               dump user's recipes 
   push ["namepattern"]               push recipes from KBH to GF
   delete "namepattern"               delete user's recipes
 
-$ ./Grainfather.py -u f-grainfather@familie-steinberg.org -P ~/.grainfather.passwd -k ~/.kleiner-brauhelfer/kb_daten.sqlite push "#004 Altbier"
+$ cat ~/.grainfather.config 
+{
+    "username": "f-grainfather@familie-steinberg.org",
+    "passwordFile": "~/.grainfather.password",
+    "kbhFile": "~/.kleiner-brauhelfer/kb_daten.sqlite"
+}
+
+$ ./Grainfather.py -v list "#01*"
 INFO:session:GET https://oauth.grainfather.com/customer/account/login/ -> 200
-INFO:session:POST https://oauth.grainfather.com/customer/account/loginPost/ -> 200
+INFO:session:POST https://oauth.grainfather.com/customer/account/loginPost/ -> 302
+INFO:session:GET https://brew.grainfather.com -> 302
 INFO:session:GET https://brew.grainfather.com -> 200
+INFO:session:Saved session state to ~/.grainfather.state
 INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=1 -> 200
 INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=2 -> 200
-INFO:interpreter:Updating <current Recipe id 181607 named "#004 Altbier">
-INFO:session:PUT https://brew.grainfather.com/recipes/181607 -> 200
-INFO:session:GET https://brew.grainfather.com/logout -> 200
+  181572 kg-- 2018-11-09 18:40 2018-11-11 09:30   22.0l #010 Spontaneous IPA
+  181571 kgp- 2018-11-09 18:42 2018-11-11 09:30   18.8l #011 Black Russian Imperial Stout
+  181573 kgp- 2018-11-09 18:42 2018-11-10 11:02   19.2l #012 Simply Red Ale
+  181639 kgp- 2018-11-09 18:44 2018-11-11 09:30   20.2l #013 Pumpkin Ale
+  181574 kgpo 2018-11-13 14:15 2018-11-13 08:47   23.8l #014 PIPA
+
+$ ./Grainfather.py -v push
+INFO:session:Read session state from ~/.grainfather.state
+INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=1 -> 200
+INFO:session:GET https://brew.grainfather.com/my-recipes/data?page=2 -> 200
+INFO:interpreter:<current Recipe id 181640 named "#000 Beispielsud"> needs no update
+INFO:interpreter:<current Recipe id 181902 named "#001 Big Bang Pale Ale"> needs no update
+INFO:interpreter:<current Recipe id 181605 named "#002 Black Hole Sun Extra Stout"> needs no update
+INFO:interpreter:<current Recipe id 181606 named "#003 Hoppel-Di-Hop Oster-Ale"> needs no update
+INFO:interpreter:<current Recipe id 181607 named "#004 Altbier"> needs no update
+INFO:interpreter:<current Recipe id 181608 named "#005 Citra Weizenbier"> needs no update
+INFO:interpreter:<current Recipe id 181609 named "#006 Mate-Eistee"> needs no update
+INFO:interpreter:<current Recipe id 181610 named "#007 Summer In The City Pale Ale"> needs no update
+INFO:interpreter:<current Recipe id 181611 named "#008 Level 42 Brown Ale"> needs no update
+INFO:interpreter:<current Recipe id 181612 named "#009 Frankator Weizendoppelbock"> needs no update
+INFO:interpreter:<current Recipe id 181571 named "#011 Black Russian Imperial Stout"> needs no update
+INFO:interpreter:<current Recipe id 181572 named "#010 Spontaneous IPA"> needs no update
+INFO:interpreter:<current Recipe id 181639 named "#013 Pumpkin Ale"> needs no update
+INFO:interpreter:<current Recipe id 181573 named "#012 Simply Red Ale"> needs no update
+INFO:interpreter:Updating <current Recipe id 181574 named "#014 PIPA">
+INFO:session:PUT https://brew.grainfather.com/recipes/181574 -> 200
 ```
 
 ### TODO
 
-- beatify list output format (sort, more columns)
-- configuration file (user id, password file, kbh file)
-- implement recipe["fermentation_steps"]
 - document KBH [[]]-tags
-- more operations: rename? ...others?
 - allow a separator to suppress parts of KBH comments
 - daemon mode, listening for database updates in the background
-- persistent sessions for faster subsequent commands -> new command "logout"
 - implement more KBH [[]]-tags (e.g. malt-ppg)
 - local log file of write operations
 - maybe, a "restore" command would be possible?
