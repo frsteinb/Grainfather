@@ -53,7 +53,8 @@ DEFAULT_SOURCE		= "Frank's Grainfather Community Tool"
 class KleinerBrauhelfer(object):
 
     """Representation of a "Kleiner Brauhelfer" database."""
-    
+
+    path = None
     conn = None
     logger = None
 
@@ -64,10 +65,20 @@ class KleinerBrauhelfer(object):
         """Opens the KBH SQlite3 database given by the filesystem path parameter."""
 
         self.logger = logging.getLogger('kbh')
+        self.path = path
 
-        fd = os.open(path, os.O_RDONLY)
+        self.reopen()
+
+
+
+    def reopen(self):
+
+        if self.conn:
+            self.conn.close()
+
+        fd = os.open(self.path, os.O_RDONLY)
         os.close(fd)
-        self.conn = sqlite3.connect(path, uri=True)
+        self.conn = sqlite3.connect(self.path, uri=True)
         self.conn.row_factory = sqlite3.Row
 
 
@@ -1115,19 +1126,7 @@ class Interpreter(object):
 
 
 
-    def daemon_handler():
-
-        # wait a moment 
-        sleep(1.0)
-
-        # then sync
-        self.push(args)
-
-
-
     def daemon(self, args):
-
-
 
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
@@ -1137,16 +1136,17 @@ class Interpreter(object):
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
-        wm = pyinotify.WatchManager()
-        loop = asyncio.get_event_loop()
-        notifier = pyinotify.AsyncioNotifier(wm, loop, callback=self.daemon_handler)
-        kbhDir = os.path.dirname(os.path.expanduser(self.config["kbhFile"]))
-        wm.add_watch(kbhDir, pyinotify.ALL_EVENTS)
-        self.logger.info("Now watching %s for changes..." % (kbhDir))
-        loop.run_forever()
-        notifier.stop()
-
-        self.push(args)
+        self.logger.info("Now watching %s for changes" % (self.config["kbhFile"]))
+        mtime = None
+        while True:
+            stat = os.stat(os.path.expanduser(self.config["kbhFile"]))
+            if mtime and (stat.st_mtime != mtime):
+                time.sleep(3)
+                self.logger.info("Detected KBH change, syncing...")
+                self.kbh.reopen()
+                self.push(args)
+            mtime = stat.st_mtime
+            time.sleep(5)
 
 
 
