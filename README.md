@@ -67,15 +67,20 @@ Usage: ./Grainfather.py [options] [command [argument] ]
   -n           --dryrun              do not write any data
   -f           --force               force operations
   -h           --help                this help message
+  -c file      --config file         read configuration file
   -u username  --user username       Grainfather community username
   -p password  --password password   Grainfather community password
   -P file      --pwfile file         read password from file
+  -l           --logout              logout (instead of keeping session persistent)
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
   list ["namepattern"]               list user's recipes
   dump ["namepattern"]               dump user's recipes 
   push ["namepattern"]               push recipes from KBH to GF
   delete "namepattern"               delete user's recipes
+  diff "namepattern"                 show json diff between kbh and gf version of a recipe
+  daemon                             run as daemon keeping GF synced with KBH
+  logout                             logout and invalidate persistent session
 
 $ cat ~/.grainfather.config 
 {

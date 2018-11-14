@@ -30,6 +30,7 @@ import getopt
 import pickle
 import fnmatch
 import logging
+import logging.handlers
 import sqlite3
 import base64
 import requests
@@ -536,7 +537,7 @@ class Session(object):
             self.cookies = state["cookies"]
             self.logger.info("Read session state from %s" % (self.stateFile))
         except Exception as error:
-            logging.getLogger().debug("No valid session state found at %s: %s" % (self.stateFile, error))
+            self.logger.debug("No valid session state found at %s: %s" % (self.stateFile, error))
 
 
 
@@ -1162,6 +1163,7 @@ def usage():
     print("""Usage: %s [options] [command [argument] ]
   -v           --verbose             increase the logging level
   -d           --debug               run at maximum debug level
+  -s           --syslog              send logging to syslog
   -n           --dryrun              do not write any data
   -f           --force               force operations
   -h           --help                this help message
@@ -1207,6 +1209,7 @@ def main():
     logging.basicConfig()
     level = logging.WARNING
     logger = logging.getLogger()
+
     requests_log = logging.getLogger("requests.packages.urllib3")
     requests_log.setLevel(logging.WARN)
 
@@ -1214,9 +1217,7 @@ def main():
         globalConfigFile = "/ibr/local/etc/grainfather.config",
         configFile = "~/.grainfather.config",
         passwordFile = "~/.grainfather.password",
-        historyFile = "~/.grainfather.history",
         stateFile = "~/.grainfather.state",
-        logFile = "~/.grainfather.log",
         username = None,
         password = None,
         kbhFile = "~/.kleiner-brauhelfer/kb_daten.sqlite"
@@ -1227,8 +1228,8 @@ def main():
 
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdnfhc:u:p:P:lk:",
-                                   ["verbose", "debug", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "logout", "kbhfile="])
+                                   "vdqsnfhc:u:p:P:lk:",
+                                   ["verbose", "debug", "quiet", "syslog", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "logout", "kbhfile="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -1253,6 +1254,16 @@ def main():
             requests_log.setLevel(level)
             requests_log.propagate = True
             http.client.HTTPConnection.debuglevel = 1
+
+        elif o in ("-s", "--syslog"):
+            logger.handlers = []
+            handler = logging.handlers.SysLogHandler(address = "/dev/log",
+                                                     facility = logging.handlers.SysLogHandler.LOG_DAEMON)
+            handler.ident = "Grainfather[%d]: " % (os.getpid())
+            logger.addHandler(handler)
+
+        elif o in ("-q", "--quiet"):
+            logger.handlers = []
 
         elif o in ("-n", "--dryrun"):
             dryrun = True
@@ -1291,7 +1302,7 @@ def main():
                 password = f.readline()
                 config["password"] = password.rstrip('\r\n')
         except Exception as error:
-            logging.getLogger().error("Could not read password from file: %s" % (error))
+            logger.error("Could not read password from file: %s" % (error))
 
     session = Session(username=config["username"], password=config["password"],
                       readonly=dryrun, force=force, stateFile=config["stateFile"])
