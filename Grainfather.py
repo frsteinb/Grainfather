@@ -414,9 +414,6 @@ class KleinerBrauhelfer(object):
 
         r = Recipe(data=data)
 
-        r.print()
-        exit(0)
-
         return r
 
 
