@@ -127,11 +127,40 @@ class KleinerBrauhelfer(object):
 
         c = self.conn.cursor()
 
-        c.execute("SELECT * FROM Hauptgaerverlauf WHERE SudID = ? ORDER BY Zeitstempel", (sud["ID"],))
         restextrakt = 0
+
+        c.execute("SELECT * FROM Hauptgaerverlauf WHERE SudID = ? ORDER BY Zeitstempel", (sud["ID"],))
         a = c.fetchall()
+        fermentation_days_hg = None
+        fermentation_temp_hg = None
         if len(a) > 0:
+            # get FG (in Plato) from last entry of "Hauptgaerverlauf"
             restextrakt = float(a[-1]["SW"])
+            if sud["BierWurdeAbgefuellt"]:
+                # get fermentation days from first and last entry of "Hauptgaerverlauf"
+                start = datetime.datetime.strptime(a[0]["Zeitstempel"][:10], '%Y-%m-%d')
+                end = datetime.datetime.strptime(a[-1]["Zeitstempel"][:10], '%Y-%m-%d')
+                fermentation_days_hg = (end - start).days
+            fermentation_temp_hg = round(sum(i["Temp"] for i in a) / len(a))
+
+        c.execute("SELECT * FROM Nachgaerverlauf WHERE SudID = ? ORDER BY Zeitstempel", (sud["ID"],))
+        a = c.fetchall()
+        fermentation_days_ng = None
+        fermentation_temp_ng = None
+        if len(a) > 0:
+            if sud["BierWurdeAbgefuellt"]:
+                # get fermentation days from first and last entry of "Nachgaerverlauf"
+                start = datetime.datetime.strptime(a[0]["Zeitstempel"][:10], '%Y-%m-%d')
+                end = datetime.datetime.strptime(a[-1]["Zeitstempel"][:10], '%Y-%m-%d')
+                fermentation_days_ng = (end - start).days
+            fermentation_temp_ng = round(sum(i["Temp"] for i in a) / len(a))
+
+        fermentation_days_sud = None
+        if sud["BierWurdeAbgefuellt"]:
+            # get fermentation days from brew day and bottling/kegging day
+            start = datetime.datetime.strptime(sud["Anstelldatum"], '%Y-%m-%d')
+            end = datetime.datetime.strptime(sud["Abfuelldatum"], '%Y-%m-%d')
+            fermentation_days_sud = (end - start).days
 
         data = {}
         data["name"] = sud["Sudname"]
@@ -336,20 +365,59 @@ class KleinerBrauhelfer(object):
         # fermentation steps
         data["fermentation_steps"] = []
         i = 0
-        days = 10
-        temp = 18
-        # XXX: fetch days from KBH Gärverlauf, or Sud dates alternatively
-        # XXX: fetch temp from KBH Gärverlauf, or KBH Hefe alternatively
-        data["fermentation_steps"].append({
-                "order": i,
-                "name": "Hauptgärung",
-                "temperature": temp,
-                "time": days })
-        i += 1
+        fermentation_string = self.extractFromText(sud["Kommentar"], "Fermentation")
+        if (not fermentation_string) or (fermentation_string[0] == ","):
+            if fermentation_days_sud and (fermentation_days_sud >= 1) and (fermentation_days_sud <= 30):
+                days = fermentation_days_sud
+            elif fermentation_days_hg and (fermentation_days_hg >= 1) and (fermentation_days_hg <= 30):
+                days = fermentation_days_hg
+            else:
+                days = 14
+            if fermentation_temp_hg:
+                temp = fermentation_temp_hg
+            # XXX: fetch temp from KBH Hefe alternatively
+            else:
+                temp = 18
+            data["fermentation_steps"].append({
+                    "order": i,
+                    "name": "Hauptgärung",
+                    "temperature": temp,
+                    "time": days })
+            i += 1
+        if fermentation_string and ":" in fermentation_string and "@" in fermentation_string:
+            steps = fermentation_string.split(",")
+            for step in steps:
+                if ":" in step and "@" in step:
+                    name = step.split(":")[0]
+                    days = step.split(":")[1].split("@")[0].replace(" ", "")
+                    temp = step.split("@")[1].replace(" ", "")
+                    data["fermentation_steps"].append({
+                            "order": i,
+                            "name": name,
+                            "temperature": temp,
+                            "time": days })
+                    i += 1
+        else:
+            if fermentation_days_ng and (fermentation_days_ng >= 1) and (fermentation_days_ng <= 30):
+                days = fermentation_days_ng
+                if fermentation_temp_ng:
+                    temp = fermentation_temp_ng
+                # XXX: fetch temp from KBH Hefe alternatively
+                else:
+                    temp = 18
+                data["fermentation_steps"].append({
+                        "order": i,
+                        "name": "Nachgärung",
+                        "temperature": temp,
+                        "time": days })
+                i += 1
 
-        # fermentation steps
+        r = Recipe(data=data)
 
-        return Recipe(data=data)
+        r.print()
+        exit(0)
+
+        return r
 
 
         
@@ -1047,7 +1115,6 @@ class Interpreter(object):
             # try to find matching GF recipe
             id = None
             for gf_recipe in gf_recipes:
-                #print("XXX %s %s" % (gf_recipe.get("name"), gf_recipe.get("updated_at")))
                 if gf_recipe.get("name") == kbh_recipe.get("name"):
                     id = gf_recipe.get("id")
                     break
