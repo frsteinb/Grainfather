@@ -240,7 +240,7 @@ class KleinerBrauhelfer(object):
             if hopfen["Pellets"] == 1:
                 typeid = HopType.PELLET.value
             else:
-                typeid = HopType.PLUG.value # kbh does not differ leaf and plug
+                typeid = HopType.LEAF.value
             data["hops"].append({
                     "name": hopfen["Name"],
                     "aa": hopfen["Alpha"],
@@ -255,7 +255,7 @@ class KleinerBrauhelfer(object):
             if hopfen["Pellets"] == 1:
                 typeid = HopType.PELLET.value
             else:
-                typeid = HopType.PLUG.value # kbh does not differ leaf and plug
+                typeid = HopType.LEAF.value
             if hopfen["Zeit"] == 0:
                 usage = HopUsageType.HOPSTAND.value
                 time = 0
@@ -283,7 +283,7 @@ class KleinerBrauhelfer(object):
                 if hopfen["Pellets"] == 1:
                     typeid = HopType.PELLET.value
                 else:
-                    typeid = HopType.PLUG.value # kbh does not differ leaf and plug
+                    typeid = HopType.LEAF.value
             else:
                 aa = 0
                 typeid = 20
