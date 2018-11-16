@@ -51,11 +51,49 @@ community account credentials. If you already have an account, you
 probably want to create a new one, just to make sure this software
 will not overwrite or mix up any data on your primary account.
 
+### Special Attributes
+
+Some pieces of information, that might be useful to get displayes on
+the Grainfather recipe site, do not have a representation in KBH.
+Therefore, one might add some information in a special syntax to the
+KBH recipe comment field. The general syntax is "[[TAGNAME: VALUE]]":
+
+*"Image"*: May contain a URL of a Photo, e.g.:
+
+```
+[[Image: https://frankensteiner.familie-steinberg.org/wp-content/uploads/2018/03/00083E8B-4A5A-4696-B54A-EB9357A23F13.jpeg]]
+```
+
+*"BJCP-Style"*: May contain the short ID of a BJCP 2015 beer style, e.g.:
+
+```
+[[BJCP-Style: 18B]]
+```
+
+*"Public"*: May contain "True" to flag a recipe to be public, default is false, e.g.:
+
+```
+[[Public: True]]
+```
+
+*"Fermentation"*: May contain a comma seprated list of fermentation
+steps each of the form "NAME:DAYS@TEMP". if the value starts with a
+comma, this list is appended to the intrinsic first fermentation steps
+built from the KBH "Gärverlauf" or other data from the "Brau- &
+Gärdaten" tab. E.g.:
+
+```
+[[Fermentation: ,Flaschengärung:14@22]]
+```
+
 ### Status
 
 This project is at a very early stage and it is unclear how far I will
-push it. Feel free to try it out. Feedback and contributions are
-welcome. But please do not expect things to work without any problems.
+push it. However, for me it does its job quite well already. Feel free
+to try it out, but please do not expect things to work without any
+problems. Feedback and contributions are welcome, preferably on the
+GitHub site at https://github.com/frsteinb/Grainfather as issues or
+pull requests.
 
 ### Usage Example
 
@@ -75,9 +113,9 @@ Usage: ./Grainfather.py [options] [command [argument] ]
   -k file      --kbhfile file        Kleiner Brauhelfer database file
 Commands:
   list ["namepattern"]               list user's recipes
-  dump ["namepattern"]               dump user's recipes 
-  push ["namepattern"]               push recipes from KBH to GF
-  delete "namepattern"               delete user's recipes
+  dump ["namepattern"]               dump user's recipe(s) 
+  push ["namepattern"]               push recipe(s) from KBH to GF
+  delete "namepattern"               delete user's recipe(s)
   diff "namepattern"                 show json diff between kbh and gf version of a recipe
   daemon                             run as daemon keeping GF synced with KBH
   logout                             logout and invalidate persistent session
@@ -127,14 +165,10 @@ INFO:session:PUT https://brew.grainfather.com/recipes/181574 -> 200
 
 ### TODO
 
-- document KBH [[]]-tags
 - allow a separator to suppress parts of KBH comments
-- daemon mode, listening for database updates in the background
 - implement more KBH [[]]-tags (e.g. malt-ppg)
-- local log file of write operations
 - maybe, a "restore" command would be possible?
-- better error handling
-
+- improved error handling
 - split: Python API / command line tool
 - handle ratings somehow?
 - (partial) sync back from GF to KBH?
