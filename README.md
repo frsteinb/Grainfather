@@ -32,6 +32,19 @@ personal KBH database to the Grainfather site.
 
 See [LICENSE.txt][4]
 
+### Respect
+
+This software makes use of an API to the Grainfather database backend
+which is not (yet) intended to be used by other clients than
+Grainfather's own web frontend. Please let's respect Bevie's work: we
+should not try to abuse the API in any kind, neither with features we
+might find that are not yet used by the web frontend, nor by too
+intensive access or more uploaded data than necessary for our own
+private purpose regarding our KBH recipes.
+
+Please repect Bevie's cool work and let's not make them take measures
+to block our use cases!
+
 ### Prerequisites
 
 This software is being developed and used on current Linux systems as
@@ -57,12 +70,6 @@ Some pieces of information, that might be useful to get displayes on
 the Grainfather recipe site, do not have a representation in KBH.
 Therefore, one might add some information in a special syntax to the
 KBH recipe comment field. The general syntax is "[[TAGNAME: VALUE]]":
-
-*"Image"*: May contain a URL of a Photo, e.g.:
-
-```
-[[Image: https://frankensteiner.familie-steinberg.org/wp-content/uploads/2018/03/00083E8B-4A5A-4696-B54A-EB9357A23F13.jpeg]]
-```
 
 *"BJCP-Style"*: May contain the short ID of a BJCP 2015 beer style, e.g.:
 

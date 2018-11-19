@@ -196,10 +196,6 @@ class KleinerBrauhelfer(object):
         data["srm"] = round(float(sud["erg_Farbe"]) * 0.508)
         data["bjcp_style_id"] = self.extractFromText(sud["Kommentar"], "BJCP-Style")
         data["is_public"] = self.extractFromText(sud["Kommentar"], "Public", default=False)
-        data["image_url"] = self.extractFromText(sud["Kommentar"], "Image")
-        # hack hack
-        if data["image_url"]:
-            data["image_url"] = "&src=" + data["image_url"]
         
         # fermentables
         data["fermentables"] = []
