@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import json
+import math
 import errno
 import getopt
 import pickle
@@ -44,10 +45,421 @@ import http.client
 import pyinotify
 import asyncio
 from enum import Enum
+import lxml.etree
+import xmltodict
 
 
 
 DEFAULT_SOURCE		= "Frank's Grainfather Community Tool"
+
+
+
+class Util(object):
+
+    """Some utility function."""
+
+
+
+    def localToUtc(t):
+
+        u = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", 
+                          time.gmtime(time.mktime(time.strptime(t, "%Y-%m-%dT%H:%M:%S"))))
+        return u
+
+
+
+    def utcToLocal(t):
+
+        utc = datetime.datetime.strptime(t[:19], '%Y-%m-%dT%H:%M:%S')
+        utc = utc.replace(tzinfo=dateutil.tz.tzutc())
+        local = utc.astimezone(dateutil.tz.tzlocal())
+        s = local.isoformat(sep=" ")
+
+        return s
+
+
+
+    def yieldToPpg(y):
+        return float(y) * 0.46177
+
+
+
+    def fToC(f):
+
+        return (f - 32) * 5 / 9
+
+
+
+    def platoToGravity(plato):
+
+        # formula learned from https://www.brewersfriend.com/plato-to-sg-conversion-chart/
+        return 1.0 + ( plato / ( 258.6 - ( ( plato / 258.2 ) * 227.1 ) ) )
+
+
+
+    def ebcToLovibond(ebc):
+
+        # from GF js: function lovi2ebc(value, dec) { return ((value * 1.3546 - 0.76) * 1.97).toFixed(dec || 0); }
+        # so, in reverse:
+        return ((ebc / 1.97) + 0.76) / 1.3546
+
+
+
+    def lToGal(value):
+
+        return value * 0.264172
+
+
+
+    def kgToLb(value):
+
+        return value * 2.20462
+
+
+
+    def gToOz(value):
+
+        return value * 0.035274
+
+
+
+class BeerSmith3(object):
+
+    """Representation of a BeerSmith3 database."""
+
+    dir = None
+    pattern = None
+    logger = None
+
+
+
+    def __init__(self, dir, pattern=None):
+
+        """Initialized access to the BeerSmith3 database given by the
+        filesystem directory parameter."""
+
+        self.logger = logging.getLogger('beersmith')
+        self.dir = dir
+        self.pattern = pattern
+
+
+
+    def collectBeerSmithRecipes(self, table):
+
+        """Retrieve a list of all recipes that match the given
+        name pattern in all folders."""
+
+        l = []
+
+        if table.__class__.__name__ != "list":
+            table = [ table ]
+
+        for entry in table:
+            if entry["data"] != None:
+                if (self.pattern in entry["name"]) and (entry["data"] != None):
+                    recipes = entry["data"]["recipe"]
+                    if recipes.__class__.__name__ != "list":
+                        recipes = [ recipes ]
+                    for recipe in recipes:
+                        l.append(recipe)
+                if "table" in entry["data"]:
+                    l.extend(self.collectBeerSmithRecipes(entry["data"]["table"]))
+
+        return l
+
+
+
+    def dictToRecipe(self, bs):
+
+        """Converts a BeerSmith3 recipe dict into a Recipe object."""
+
+        data = {}
+        brew_data = {}
+
+        data["name"] = bs["f_r_name"]
+
+        data["og"] = float("%.3f" % float(bs["f_r_desired_og"]))
+        data["ibu"] = round(float(bs["f_r_desired_ibu"]))
+        data["srm"] = float("%.1f" % float(bs["f_r_desired_color"]))
+
+        data["is_active"] = True # what is this?
+        data["is_public"] = True # could we allow adjustment in BeerSmith3 somehow?
+        data["notes"] = bs["f_r_notes"]
+        data["description"] = bs["f_r_description"]
+        data["efficiency"] = float(bs["f_r_equipment"]["f_e_efficiency"]) / 100 # percent -> fraction
+        data["created_at"] = bs["agedata"]["_mod_"] + "T00:00:00.000000Z"
+        data["updated_at"] = bs["_mod_"] + "T00:00:00.000000Z"
+        data["batch_size"] = float("%.2f" % (float(bs["f_r_equipment"]["f_e_batch_vol"]) * 0.0295735)) # fl oz -> l
+        data["boil_size"] = float("%.2f" % (float(bs["f_r_equipment"]["f_e_boil_vol"]) * 0.0295735)) # TBD: at start or end of boil?
+        data["boil_time"] = round(float(bs["f_r_equipment"]["f_e_boil_time"]))
+        data["losses"] = float("%.02f" % (float(bs["f_r_equipment"]["f_e_trub_loss"]) * 0.0295735))
+        data["unit_type_id"] = UnitType.METRIC.value; # TBD: we could derive the unit type from BeerSmith options
+        if bs["f_r_style"]["f_s_guide"] == "BJCP 2015":
+            data["bjcp_style_id"] = "%s%s" % (bs["f_r_style"]["f_s_number"], chr(64+int(bs["f_r_style"]["f_s_letter"])))
+
+        # ingredients
+        if ("ingredients" in bs) and ("data" in bs["ingredients"]):
+            # fermentables
+            data["fermentables"] = []
+            grain_weight = 0.0
+            if ("grain" in bs["ingredients"]["data"]):
+                grains = bs["ingredients"]["data"]["grain"]
+                if grains.__class__.__name__ != "list":
+                    grains = [ grains ]
+                for grain in grains:
+                    if int(grain["f_g_use"]) == 0: # mash
+                        usageType = FermentableUsageType.MASH.value
+                    elif int(grain["f_g_use"]) == 1: # steep
+                        usageType = FermentableUsageType.STEEP.value
+                    elif int(grain["f_g_use"]) == 2: # boil
+                        usageType = FermentableUsageType.EXTRACT.value
+                    elif int(grain["f_g_use"]) >= 3: # whirlpool, or later
+                        usageType = FermentableUsageType.LATEADDITION.value
+                    else:
+                        usageType = FermentableUsageType.MASH.value # default
+                    data["fermentables"].append({
+                            "name": grain["f_g_name"],
+                            "ppg": float("%.1f" % (Util.yieldToPpg(float(grain["f_g_yield"])))),
+                            "lovibond": float("%.02f" % (float(grain["f_g_color"]))), # lovibond
+                            "fermentable_usage_type_id": usageType,
+                            "fermentable_id": None,
+                            "amount": float("%.03f" % (float(grain["f_g_amount"]) * 0.0283495))  # oz -> kg
+                            })
+                    grain_weight += (float(grain["f_g_amount"]) * 0.0283495) # in kg
+
+            # hops
+            data["hops"] = []
+            if ("hops" in bs["ingredients"]["data"]):
+                hops = bs["ingredients"]["data"]["hops"]
+                if hops.__class__.__name__ != "list":
+                    hops = [ hops ]
+                for hop in hops:
+                    if int(hop["f_h_form"]) == 0: # pellet
+                        typeid = HopType.PELLET.value
+                    elif int(hop["f_h_form"]) == 1: # plug
+                        typeid = HopType.PLUG.value
+                    elif int(hop["f_h_form"]) == 2: # leaf
+                        typeid = HopType.LEAF.value
+                    elif int(hop["f_h_form"]) >= 3: # extract, other form of extract
+                        typeid = HopType.EXTRACT.value
+                    else:
+                        typeid = HopType.PELLET.value # default
+                    time = round(float(hop["f_h_boil_time"]))
+                    if int(hop["f_h_use"]) == 0: # boil
+                        usageType = HopUsageType.BOIL.value
+                    elif int(hop["f_h_use"]) == 1: # dry hop
+                        usageType = HopUsageType.DRYHOP.value
+                        time = round(float(hop["f_h_dry_hop_time"]))
+                    elif int(hop["f_h_use"]) == 2: # mash
+                        usageType = HopUsageType.MASH.value
+                    elif int(hop["f_h_use"]) == 3: # first wort
+                        usageType = HopUsageType.FIRSTWORT.value
+                    elif int(hop["f_h_use"]) == 4: # steep / whirlpool
+                        usageType = HopUsageType.HOPSTAND.value
+                    else:
+                        usageType = HopUsageType.BOIL.value # default
+                    data["hops"].append({
+                            "name": hop["f_h_name"],
+                            "aa": float("%.01f" % (float(hop["f_h_alpha"]))),
+                            "hop_type_id": typeid,
+                            "hop_usage_type_id": usageType,
+                            "time": time,
+                            "amount": float("%.1f" % (float(hop["f_h_amount"]) * 28.3495)) # oz -> g
+                            })
+
+            # yeasts
+            data["yeasts"] = []
+            if ("yeast" in bs["ingredients"]["data"]):
+                yeasts = bs["ingredients"]["data"]["yeast"]
+                if yeasts.__class__.__name__ != "list":
+                    yeasts = [ yeasts ]
+                for yeast in yeasts:
+                    name = yeast["f_y_name"]
+                    if yeast["f_y_product_id"] and len(yeast["f_y_product_id"]) > 0:
+                        name = name + " " + yeast["f_y_product_id"]
+                    if yeast["f_y_lab"] and len(yeast["f_y_lab"]) > 0:
+                        name = yeast["f_y_lab"] + " " + name
+                    data["yeasts"].append({
+                            "name": name,
+                            "unit": "packets",
+                            "attenuation": float("%.02f" % (float(yeast["f_y_max_attenuation"]) / 100)),
+                            "amount": float("%.1f" % (float(yeast["f_y_amount"])))
+                            })
+                
+            # adjuncts
+            data["adjuncts"] = []
+            if ("misc" in bs["ingredients"]["data"]):
+                miscs = bs["ingredients"]["data"]["misc"]
+                if miscs.__class__.__name__ != "list":
+                    miscs = [ miscs ]
+                for misc in miscs:
+                    if int(misc["f_m_units"]) == 0:
+                        unit = "mg"
+                    elif int(misc["f_m_units"]) == 1:
+                        unit = "g"
+                    elif int(misc["f_m_units"]) == 2:
+                        unit = "oz"
+                    elif int(misc["f_m_units"]) == 3:
+                        unit = "lb"
+                    elif int(misc["f_m_units"]) == 4:
+                        unit = "kg"
+                    elif int(misc["f_m_units"]) == 5:
+                        unit = "ml"
+                    elif int(misc["f_m_units"]) == 6:
+                        unit = "tsp"
+                    elif int(misc["f_m_units"]) == 7:
+                        unit = "tbsp"
+                    elif int(misc["f_m_units"]) == 8:
+                        unit = "cup"
+                    elif int(misc["f_m_units"]) == 9:
+                        unit = "pt"
+                    elif int(misc["f_m_units"]) == 10:
+                        unit = "qt"
+                    elif int(misc["f_m_units"]) == 11:
+                        unit = "l"
+                    elif int(misc["f_m_units"]) == 12:
+                        unit = "gal"
+                    elif int(misc["f_m_units"]) == 13:
+                        unit = "items"
+                    else:
+                        unit = "units"
+                    time = float(misc["f_m_time"])
+                    if int(misc["f_m_use"]) == 0: # boil
+                        if time == 0:
+                            usageType = AdjunctUsageType.FLAMEOUT.value
+                        else:
+                            usageType = AdjunctUsageType.BOIL.value
+                    elif int(misc["f_m_use"]) == 1: # mash
+                        usageType = AdjunctUsageType.MASH.value
+                        time = round(float(hop["f_h_dry_hop_time"]))
+                    elif int(misc["f_m_use"]) == 2: # primary
+                        usageType = AdjunctUsageType.PRIMARY.value
+                    elif int(misc["f_m_use"]) == 3: # secondary
+                        usageType = AdjunctUsageType.SECONDARY.value
+                    elif int(misc["f_m_use"]) == 4: # bottling
+                        usageType = AdjunctUsageType.BOTTLE.value
+                    elif int(misc["f_m_use"]) == 5: # sparge
+                        usageType = AdjunctUsageType.SPARGE.vlue
+                    else:
+                        usageType = AdjunctUsageType.BOIL.value
+                    data["adjuncts"].append({
+                            "name": misc["f_m_name"],
+                            "adjunct_usage_type_id": usageType,
+                            "unit": unit,
+                            "amount": float("%.2f" % (float(misc["f_m_amount"]))),
+                            "time": time
+                            })
+
+        # mash
+        if ("f_r_mash" in bs) and ("steps" in bs["f_r_mash"]) and ("data" in bs["f_r_mash"]["steps"]) and ("mashstep" in bs["f_r_mash"]["steps"]["data"]):
+            # mash steps
+            data["mash_steps"] = []
+            steps = bs["f_r_mash"]["steps"]["data"]["mashstep"]
+            if steps.__class__.__name__ != "list":
+                steps = [ steps ]
+            i = 0
+            for step in steps:
+                data["mash_steps"].append({
+                        "order": i,
+                        "name": step["f_ms_name"],
+                        "temperature": round(Util.fToC(float(step["f_ms_step_temp"]))),
+                        "time": round(float(step["f_ms_step_time"]))
+                        })
+                i += 1
+
+        # fermentation steps
+        data["fermentation_steps"] = []
+        if "f_r_age" in bs:
+            i = 0
+            a = bs["f_r_age"]
+            n = a["f_a_name"]
+            if int(a["f_a_type"]) >= 0:
+                data["fermentation_steps"].append({
+                        "order": i,
+                        "name": n + ", Primary",
+                        "temperature": round(Util.fToC(float(a["f_a_prim_temp"]))),
+                        "time": round(float(a["f_a_prim_days"]))
+                        })
+                i += 1
+            if int(a["f_a_type"]) >= 1:
+                data["fermentation_steps"].append({
+                        "order": i,
+                        "name": n + ", Secondary",
+                        "temperature": round(Util.fToC(float(a["f_a_sec_temp"]))),
+                        "time": round(float(a["f_a_sec_days"]))
+                        })
+                i += 1
+            if int(a["f_a_type"]) >= 2:
+                data["fermentation_steps"].append({
+                        "order": i,
+                        "name": n + ", Tertiary",
+                        "temperature": round(Util.fToC(float(a["f_a_tert_temp"]))),
+                        "time": round(float(a["f_a_tert_days"]))
+                        })
+                i += 1
+            if float(a["f_a_age"]) > 0:
+                ageSuffix = ""
+                if a["f_a_age_temp"] != a["f_a_end_age_temp"]:
+                    ageSuffix = " (end temp %s°C)" % (round(Util.fToC(float(a["f_a_end_age_temp"]))))
+                data["fermentation_steps"].append({
+                        "order": i,
+                          "name": n + ", Age" + ageSuffix,
+                          "temperature": round(Util.fToC(float(a["f_a_age_temp"]))),
+                          "time": round(float(a["f_a_age"]))
+                          })
+            
+        # finally create the Recipe and Brew objects from the dicts
+        r = Recipe(data=data, brew_data=brew_data)
+
+        r.recalculate(force=True)
+
+        return r
+
+
+
+    def getRecipes(self, namepattern="*"):
+
+        """Retrieves an array of Recipe objects from the BeerSmith3
+        database based on an optional name pattern."""
+
+        recipes = []
+
+        # BeerSmith XML is no real XML :-( - use HTML parser to allow HTML entities
+        parser = lxml.etree.HTMLParser(recover=True)
+
+        tree = lxml.etree.parse("%s/Recipe.bsmx" % (self.dir), parser=parser)
+        b = lxml.etree.tostring(tree.getroot(), method="xml")
+        doc = xmltodict.parse(b.decode("utf-8"))
+        bs_recipes = self.collectBeerSmithRecipes(doc["html"]["body"]["recipe"]["data"]["table"])
+
+        bs_recipes = list(filter(lambda r: fnmatch.fnmatch(r["f_r_name"], namepattern), bs_recipes))
+
+        print(json.dumps(bs_recipes, sort_keys=True, indent=4))
+
+        for bs_recipe in bs_recipes:
+            recipe = self.dictToRecipe(bs_recipe)
+            recipes.append(recipe)
+        
+        return recipes
+
+
+
+    def getRecipe(self, namepattern):
+
+        """Retrieves one Recipe object from the BeerSmith3 database
+        based on a name pattern."""
+
+        recipes = self.getRecipes(namepattern)
+
+        if len(recipes) == 0:
+            self.logger.warn("pattern did not result in any entry")
+            return None
+
+        if len(recipes) > 1:
+            self.logger.warn("pattern did not result in a unique entry")
+            return None
+
+        return recipes[0]
 
 
 
@@ -111,14 +523,6 @@ class KleinerBrauhelfer(object):
 
 
 
-    def localToUtc(self, t):
-
-        u = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", 
-                          time.gmtime(time.mktime(time.strptime(t, "%Y-%m-%dT%H:%M:%S"))))
-        return u
-
-
-
     def sudToRecipe(self, sud):
 
         """Converts a "sud" read from the KBH database into a Recipe object.
@@ -163,14 +567,16 @@ class KleinerBrauhelfer(object):
             fermentation_days_sud = (end - start).days
 
         data = {}
+        brew_data = {}
+
         data["name"] = sud["Sudname"]
         if sud["erg_Alkohol"] > 0:
             data["abv"] = sud["erg_Alkohol"]
-        data["batch_size"] = sud["WuerzemengeAnstellen"] # with GF batch size does not include losses
-        data["boil_size"] = sud["WuerzemengeKochende"]
+        data["batch_size"] = sud["WuerzemengeAnstellen"]
+        data["boil_size"] = sud["WuerzemengeKochende"] # TBD: at start or end of boil?
         data["boil_time"] = sud["KochdauerNachBitterhopfung"]
-        data["og"] = Session.platoToGravity(sud["SWAnstellen"])
-        data["fg"] = Session.platoToGravity(restextrakt)
+        data["og"] = float("%.03f" % Util.platoToGravity(sud["SWAnstellen"]))
+        data["fg"] = float("%.03f" % Util.platoToGravity(restextrakt))
 
         # formula from https://brauerei.mueggelland.de/vergaerungsgrad.html
         stammwuerze = float(sud["SWAnstellen"])
@@ -181,51 +587,59 @@ class KleinerBrauhelfer(object):
         # we reverse engineered this calories factor
         data["calories"] = round(kcal * 3.55)
         # dates seem to be overwritten by the GF server
-        # in fact, they update timestamps seems to updates somewhat later ?!?!
-        data["created_at"] = self.localToUtc(sud["Erstellt"])
-        data["updated_at"] = self.localToUtc(sud["Gespeichert"])
+        data["created_at"] = Util.localToUtc(sud["Erstellt"])
+        data["updated_at"] = Util.localToUtc(sud["Gespeichert"])
         # pick description from first paragraph of "Kommentar"
         data["description"] = sud["Kommentar"].splitlines()[0]
         data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0))
         data["ibu"] = sud["IBU"]
         data["bggu"] = float(data["ibu"]) / (float(data["og"]) - 1.0) / 1000
-        data["is_active"] = True # what is this?
-        if sud["JungbiermengeAbfuellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
-            data["losses"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["JungbiermengeAbfuellen"]))
+        if sud["WuerzemengeAnstellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
+            data["losses"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["WuerzemengeAnstellen"]))
+        else:
+            data["losses"] = 2.0 # default losses by trub and chiller
         data["notes"] = re.sub(r'\[\[[^\]]*\]\]\n?', r'', sud["Kommentar"])
-        data["srm"] = round(float(sud["erg_Farbe"]) * 0.508)
+        data["srm"] = float("%.1f" % (float(sud["erg_Farbe"]) * 0.508))
         data["bjcp_style_id"] = self.extractFromText(sud["Kommentar"], "BJCP-Style")
+        data["is_active"] = True # what is this?
         data["is_public"] = self.extractFromText(sud["Kommentar"], "Public", default=False)
+        data["unit_type_id"] = UnitType.METRIC.value;
         
         # fermentables
         data["fermentables"] = []
+        grain_weight = 0.0
         c.execute("SELECT * FROM Malzschuettung WHERE SudID = ? ORDER BY Prozent DESC", (sud["ID"],))
         malze = c.fetchall()
         for malz in malze:
+            ausbeute = self.extractFromText(malz["Kommentar"], "Ausbeute", default=80)
+            ppg = float("%.1f" % (Util.yieldToPpg(ausbeute)))
             data["fermentables"].append({
                     "name": malz["Name"],
-                    "ppg": 35.0, # a rough estimate
-                    "lovibond": Session.ebcToLovibond(float(malz["Farbe"])),
-                    "fermentable_usage_type_id": FermantableUsageType.MASH.value, # kbh supports just mash for "Malz"
+                    "ppg": ppg,
+                    "lovibond": float("%.3f" % Util.ebcToLovibond(float(malz["Farbe"]))),
+                    "fermentable_usage_type_id": FermentableUsageType.MASH.value, # kbh supports just mash for "Malz"
                     "fermentable_id": None,
                     "amount": float("%.3f" % (malz["erg_Menge"])) })
+            grain_weight += malz["erg_Menge"]
         # we assume "Weitere Zutaten" with "Ausbeute > 0" are other fermentables
         c.execute("SELECT * FROM WeitereZutatenGaben WHERE SudID = ? AND Typ != 100 AND Ausbeute > 0 ORDER BY erg_Menge DESC", (sud["ID"],))
         zutaten = c.fetchall()
         for zutat in zutaten:
             if zutat["Zeitpunkt"] == 2:
-                usage = FermantableUsageType.MASH.value
+                usage = FermentableUsageType.MASH.value
             elif zutat["Zeitpunkt"] == 1:
-                usage = FermantableUsageType.EXTRACT.value
+                usage = FermentableUsageType.EXTRACT.value
             elif zutat["Zeitpunkt"] == 0:
-                usage = FermantableUsageType.LATEADDITION.value
+                usage = FermentableUsageType.LATEADDITION.value
+            ppg = float("%.1f" % (Util.yieldToPpg(float(zutat["Ausbeute"]))))
             data["fermentables"].append({
                     "name": zutat["Name"],
-                    "ppg": round(float(zutat["Ausbeute"]) / 2.5),
-                    "lovibond": Session.ebcToLovibond(float(zutat["Farbe"])),
+                    "ppg": ppg,
+                    "lovibond": float("%.3f" % Util.ebcToLovibond(float(zutat["Farbe"]))),
                     "fermentable_usage_type_id": usage,
                     "fermentable_id": None,
                     "amount": float("%.3f" % (zutat["erg_Menge"] / 1000)) })
+            grain_weight += zutat["erg_Menge"] / 1000
 
         # hops
         data["hops"] = []
@@ -282,7 +696,7 @@ class KleinerBrauhelfer(object):
                     typeid = HopType.LEAF.value
             else:
                 aa = 0
-                typeid = 20
+                typeid = HopType.PELLET.value
             data["hops"].append({
                     "name": zutat["Name"],
                     "hop_usage_type_id": HopUsageType.DRYHOP.value,
@@ -298,7 +712,7 @@ class KleinerBrauhelfer(object):
             else:
                 data["hops"][-1]["time"] = 0
 
-        # kbh supports only one yeast in a recipe
+        # yeast (kbh supports only one yeast in a recipe)
         if sud["HefeAnzahlEinheiten"] == 0:
             data["yeasts"] = []
         else:
@@ -371,7 +785,7 @@ class KleinerBrauhelfer(object):
                 days = 14
             if fermentation_temp_hg:
                 temp = fermentation_temp_hg
-            # XXX: fetch temp from KBH Hefe alternatively
+            # TBD: fetch temp from KBH Hefe alternatively
             else:
                 temp = 18
             data["fermentation_steps"].append({
@@ -398,7 +812,7 @@ class KleinerBrauhelfer(object):
                 days = fermentation_days_ng
                 if fermentation_temp_ng:
                     temp = fermentation_temp_ng
-                # XXX: fetch temp from KBH Hefe alternatively
+                # TBD: fetch temp from KBH Hefe alternatively
                 else:
                     temp = 18
                 data["fermentation_steps"].append({
@@ -408,7 +822,42 @@ class KleinerBrauhelfer(object):
                         "time": days })
                 i += 1
 
-        r = Recipe(data=data)
+        # brew session
+        brew_data["created_at"] = data["created_at"]
+        brew_data["updated_at"] = data["updated_at"]
+        brew_data["is_active"] = data["is_active"]
+        brew_data["is_public"] = data["is_public"]
+        brew_data["unit_type_id"] = data["unit_type_id"]
+        brew_data["grain_weight"] = grain_weight
+        brew_data["boil_time"] = data["boil_time"]
+        brew_data["strike_water_volume"] = sud["erg_WHauptguss"]
+        brew_data["sparge_water_volume"] = sud["erg_WNachguss"]
+        brew_data["total_water_needed"] = brew_data["strike_water_volume"] + brew_data["sparge_water_volume"]
+        brew_data["strike_water_temp"] = sud["EinmaischenTemp"]
+        #brew_data["boil_volume_est"] = 
+        #brew_data["ferment_volume_est"] = 
+
+        
+        if sud["BierWurdeVerbraucht"]:
+            brew_data["status"] = BrewStatusType.COMPLETE
+        elif sud["BierWurdeAbgefuellt"]:
+            # Note: the transition from CONDITIONING to COMPLETE is
+            # dynamic, it depends on the current date compared to the
+            # kegging date plus conditioning weeks.
+            d = datetime.datetime.strptime(sud["Abfuelldatum"][:10], '%Y-%m-%d') + datetime.timedelta(weeks = sud["Reifezeit"])
+            if  datetime.datetime.now() > d:
+                brew_data["status"] = BrewStatusType.COMPLETE
+            else:
+                brew_data["status"] = BrewStatusType.CONDITIONING
+        elif sud["BierWurdeGebraut"]:
+            brew_data["status"] = BrewStatusType.FERMENTATION
+        else:
+            brew_data["status"] = BrewStatusType.BREWDAY
+
+        # finally create the Recipe and Brew objects from the dicts
+        r = Recipe(data=data, brew_data=brew_data)
+
+        r.recalculate()
 
         return r
 
@@ -416,8 +865,8 @@ class KleinerBrauhelfer(object):
         
     def getRecipes(self, namepattern="*"):
 
-        """Retrieves a array of Recipe objects from the KBH database based on
-        an optional SQL name pattern (use e.g. % as a wildcard)."""
+        """Retrieves an array of Recipe objects from the KBH database
+        based on an optional name pattern."""
 
         namepattern = namepattern.replace("*", "%")
 
@@ -436,8 +885,8 @@ class KleinerBrauhelfer(object):
 
     def getRecipe(self, namepattern):
 
-        """Retrieves one Recipe objects from the KBH database based on
-        an SQL name pattern (use e.g. % as a wildcard)."""
+        """Retrieves one Recipe object from the KBH database based on
+        a name pattern."""
 
         recipes = self.getRecipes(namepattern)
 
@@ -453,6 +902,28 @@ class KleinerBrauhelfer(object):
 
 
 
+    def getBrew(self, recipe=None, namepattern=None):
+
+        """Retrieves a Brew objects from the KBH database based on
+        either a given Recipe object or an SQL recipe name pattern
+        (use e.g. % as a wildcard)."""
+
+        if not recipe:
+
+            recipes = self.getRecipes(namepattern)
+
+            if len(recipes) == 0:
+                self.logger.warn("pattern did not result in any entry")
+                return None
+
+            if len(recipes) > 1:
+                self.logger.warn("pattern did not result in a unique entry")
+                return None
+
+            recipe = recipes[0]
+
+
+
 class Session(object):
 
     """Representation of a user session on the Grainfather brew community database."""
@@ -464,44 +935,6 @@ class Session(object):
     readonly = False
     headers = {}
     cookies = None
-
-
-
-    def utcToLocal(self, t):
-
-        utc = datetime.datetime.strptime(t[:19], '%Y-%m-%dT%H:%M:%S')
-        utc = utc.replace(tzinfo=dateutil.tz.tzutc())
-        local = utc.astimezone(dateutil.tz.tzlocal())
-        s = local.isoformat(sep=" ")
-
-        return s
-
-
-
-    def platoToGravity(plato):
-
-        #gravity = 1.0 + (4.0 * float(plato) / 1000.0)
-
-        # formula learned from https://www.brewersfriend.com/plato-to-sg-conversion-chart/
-        gravity = 1.0 + ( plato / ( 258.6 - ( ( plato / 258.2 ) * 227.1 ) ) )
-
-        gravity = "%.3f" % (gravity)
-
-        return float(gravity)
-
-
-
-    def ebcToLovibond(ebc):
-
-        #lovibond = "%.3f" % ((ebc + 1.2) / 2.0)
-        #lovibond = "%.3f" % (ebc / 1.97)
-        #lovibond = "%.3f" % ((ebc + 1.2) / 2.6) # XXX: not yet correct
-
-        # from GF js: function lovi2ebc(value, dec) { return ((value * 1.3546 - 0.76) * 1.97).toFixed(dec || 0); }
-        # so, in reverse:
-        lovibond = "%.3f" % (((ebc / 1.97) + 0.76) / 1.3546)
-
-        return float(lovibond)
 
 
 
@@ -699,7 +1132,7 @@ class Session(object):
 
 
 
-    def getMyRecipes(self, namepattern=None, full=False):
+    def getMyRecipes(self, namepattern=None, full=False, brews=False):
 
         recipes = []
 
@@ -727,13 +1160,17 @@ class Session(object):
             for recipe in recipes:
                 recipe.reload()
 
+        if brews:
+            for recipe in recipes:
+                recipe.getBrews(full=full)
+
         return recipes
 
 
 
-    def getMyRecipe(self, namepattern=None, full=True):
+    def getMyRecipe(self, namepattern=None, full=True, brews=False):
 
-        recipes = self.getMyRecipes(namepattern, full=full)
+        recipes = self.getMyRecipes(namepattern, full=full, brews=brews)
 
         if len(recipes) == 0:
             self.logger.warn("pattern did not result in any entry")
@@ -759,11 +1196,11 @@ class AdjunctUsageType(Enum):
 
 
 
-class FermantableUsageType(Enum):
+class FermentableUsageType(Enum):
 
     MASH		= 10
-    EXTRACT		= 20	# does this mean during boil or does this mean the malt is given as (dry or liquid) extract?
-    STEEP		= 30	# what is this? i guess it means during the last few minutes of the boil
+    EXTRACT		= 20
+    STEEP		= 30
     LATEADDITION	= 40	# what is this? probably after boil during fermentation or even later?
 
 
@@ -773,7 +1210,7 @@ class HopType(Enum):
     LEAF		= 10
     PELLET		= 20
     PLUG		= 30
-
+    EXTRACT             = 40    # ???
 
 
 class HopUsageType(Enum):
@@ -781,7 +1218,8 @@ class HopUsageType(Enum):
     MASH		= 10	# min
     FIRSTWORT		= 15	# min
     BOIL		= 20	# min
-    HOPSTAND		= 30	# min
+    HOPSTAND		= 30	# min # obsolete?
+    AROMA		= 30	# min
     DRYHOP		= 40	# days
 
 
@@ -805,6 +1243,28 @@ YeastUnitTypes = [ "packets", "vials", "g", "ml" ]
 
 
 AdjunctUnitTypes = [ "each", "kg", "g", "l", "ml", "tbsp", "tsp" ]
+
+
+
+class BrewStatusType(Enum):
+
+    BREWDAY		= 10
+    FERMENTATION	= 20
+    CONDITIONING	= 30
+    COMPLETE		= 40
+
+    def getName(id):
+        
+        if id == BrewStatusType.BREWDAY:
+            return "Brew Day"
+        elif id == BrewStatusType.FERMENTATION:
+            return "Fermentation"
+        elif id == BrewStatusType.CONDITIONING:
+            return "Conditioning"
+        elif id == BrewStatusType.COMPLETE:
+            return "Complete"
+        else:
+            return "Unknown"
 
 
 
@@ -908,7 +1368,10 @@ class Object(object):
 
     def get(self, attr):
 
-        return self.data[attr]
+        if attr in self.data:
+            return self.data[attr]
+        else:
+            return None
 
 
 
@@ -951,9 +1414,11 @@ class Recipe(Object):
     urlsave = "https://brew.grainfather.com/recipes/{id}"
     urlcreate = "https://brew.grainfather.com/recipes"
 
+    brews = None
 
 
-    def __init__(self, session=None, id=None, xmlfilename=None, data=None):
+
+    def __init__(self, session=None, id=None, xmlfilename=None, data=None, brew_data=None):
 
         if session and xmlfilename:
 
@@ -964,6 +1429,8 @@ class Recipe(Object):
 
         super(Recipe, self).__init__(session=session, id=id, data=data)
 
+        if brew_data:
+            self.brews = [ Brew(session=session, data=brew_data) ]
      
 
 
@@ -983,15 +1450,209 @@ class Recipe(Object):
 
 
 
+    def toGal(self, value):
+
+        if self.data['unit_type_id'] == UnitType.METRIC.value:
+            return Util.lToGal(value)
+        else:
+            return value
+
+
+
+    def toLb(self, value):
+
+        if self.data['unit_type_id'] == UnitType.METRIC.value:
+            return Util.kgToLb(value)
+        else:
+            return value
+
+
+
+    def toOz(self, value):
+
+        if self.data['unit_type_id'] == UnitType.METRIC.value:
+            return Util.gToOz(value)
+        else:
+            return value
+
+
+
+    def recalculate(self, force=False):
+
+        """Recalculate those recipe attributes that are not primarily
+        part of the recipe, but can be derived from other
+        user-adjusted attributes of ingredients, mash steps, etc., and
+        the equipment. Those attributes than can be recalculated but
+        that hold already some value, are only recalculated, if the
+        force flags is True."""
+
+        ## most parts of these calculations are based on the
+        ## javascript code from the Grainfather web frontend, so that
+        ## our calculations match those after uploading recipes.
+
+        attenuation = 0.75 # if we do not know any better
+        if ("yeasts" in self.data) and (len(self.data["yeasts"]) > 0):
+            attenuation = 0.0
+            for yeast in self.data["yeasts"]:
+                if ("attenuation" in yeast) and (yeast["attenuation"] > 0):
+                    attenuation += float(yeast["attenuation"])
+                else:
+                    attenuation += 0.75  # if no explicit attenuation is given
+            attenuation /= len(self.data["yeasts"])
+        # TBD: take influence of maltose rest temperature into account
+
+        postBoilVolume = self.toGal(self.data["batch_size"] + self.data["losses"])
+        color = 0.0
+        earlyGravityPoints = 0.0
+        totalGravityPoints = 0.0
+
+        if ("fermentables" in self.data) and (len(self.data["fermentables"]) > 0):
+            for fermentable in self.data["fermentables"]:
+                if fermentable["amount"] > 0:
+                    if fermentable["fermentable_usage_type_id"] == FermentableUsageType.MASH.value:
+                        efficiency = self.data["efficiency"]
+                    elif fermentable["fermentable_usage_type_id"] == FermentableUsageType.STEEP.value:
+                        efficiency = 0.5 # we assume this as a default steep efficiency
+                    else:
+                        efficiency = 1.0
+                    g = self.toLb(fermentable["amount"]) * fermentable["ppg"] * efficiency / postBoilVolume
+                    totalGravityPoints += g
+                    if fermentable["fermentable_usage_type_id"] != FermentableUsageType.LATEADDITION.value:
+                        earlyGravityPoints += g
+                    color += self.toLb(fermentable["amount"]) * fermentable["lovibond"] / postBoilVolume
+        else:
+            totalGravityPoints = 0
+
+        if (force) or (not "og" in self.data) or (self.data["og"] == None) or (float(self.data["og"]) <= 1.000):
+            self.data["og"] = float("%.3f" % (1.0 + totalGravityPoints / 1000))
+        if (force) or (not "fg" in self.data) or (self.data["fg"] == None) or (float(self.data["fg"]) <= 1.000):
+            self.data["fg"] = float("%.3f" % (1.0 + (totalGravityPoints * (1.0 - attenuation)) / 1000))
+        if (force) or (not "abv" in self.data) or (self.data["abv"] == None) or (float(self.data["abv"]) <= 0.0):
+            self.data["abv"] = float("%.01f" % ((self.data["og"] - self.data["fg"]) * 131.25))
+        if (force) or (not "srm" in self.data) or (self.data["srm"] == None) or (float(self.data["srm"]) <= 0.0):
+            self.data["srm"] = float("%.1f" % (1.49 * math.pow(color, 0.69)))
+        if (force) or (not "calories" in self.data) or (self.data["calories"] == None) or (float(self.data["calories"]) <= 0.0):
+            self.data["calories"] = round(1881.22 * self.data["fg"] * (self.data["og"] - self.data["fg"]) / (1.775 - self.data["og"]) + 3550.0 * self.data["fg"] * (0.1808 * self.data["og"] + 0.8192 * self.data["fg"] - 1.0004))
+
+        print("XXX attenuation:%s totalGravityPoints:%s postboil:%s og:%s" % (attenuation, totalGravityPoints, postBoilVolume, self.data["og"]))
+
+        earlyOG = 1.0 + earlyGravityPoints / 1000
+            
+        if ("hops" in self.data) and (len(self.data["hops"]) > 0):
+            totalIBU = 0.0
+            for hop in self.data["hops"]:
+                ibu = 0.0
+                if hop["hop_usage_type_id"] in [HopUsageType.MASH.value, HopUsageType.FIRSTWORT.value, HopUsageType.BOIL.value, HopUsageType.AROMA.value]:
+                    if hop["hop_usage_type_id"] == HopUsageType.FIRSTWORT.value:
+                        time = self.data["boil_time"]
+                    else:
+                        time = hop["time"]
+                    if hop["hop_usage_type_id"] in [HopUsageType.MASH.value, HopUsageType.FIRSTWORT.value, HopUsageType.BOIL.value]:
+                        factor = 1.1
+                    else:
+                        factor = 1.0
+                    utilization = 1.65 * math.pow(0.000125, earlyOG - 1.0) * (1.0 - math.exp(-0.04 * time)) / 4.15 * factor
+                    ibu = hop["aa"] / 100.0 * self.toOz(hop["amount"]) * 7490 / postBoilVolume * utilization
+
+                    if hop["hop_usage_type_id"] == HopUsageType.AROMA.value:
+                        ibu /= 2
+                    elif hop["hop_usage_type_id"] == HopUsageType.MASH.value:
+                        ibu *= 0.2
+                    elif hop["hop_usage_type_id"] == HopUsageType.FIRSTWORT.value:
+                        ibu *= 1.1 # Note: other sources say that first worst hopping leads to slightly _less_ bitterness ?!
+                    print("XXX earlyOG:%s postboil:%s aa:%s amount:%s factor:%s util:%s time:%s  -> ibu:%s" % (earlyOG, postBoilVolume, hop["aa"], hop["amount"], factor, utilization, time, ibu))
+                    totalIBU += ibu
+                if (force) or (not "ibu" in hop) or (hop["ibu"] == None):
+                    hop["ibu"] = float("%0.01f" % ibu)
+            if (force) or (not "ibu" in self.data) or (self.data["ibu"] == None):
+                self.data["ibu"] = float("%0.01f" % totalIBU)
+
+        if (force) or (not "bggu" in self.data) or (self.data["bggu"] == None) or (float(self.data["bggu"]) <= 0.0):
+            if (self.data["og"] <= 1.0) and (self.data["ibu"]) > 0:
+                self.data["bggu"] = 1.0
+            elif (self.data["og"] == 0) and (self.data["ibu"]) == 0:
+                self.data["bggu"] = 0.0
+            else:
+                self.data["bggu"] = self.data["ibu"] / ((self.data["og"] - 1.0) * 1000)
+
+
+
+    def getBrews(self, full=False):
+
+        if self.brews != None:
+
+            return self.brews
+
+        self.brews = []
+
+        url = "https://brew.grainfather.com/recipes/{recipe_id}/brew-sessions/data?page=1".format(recipe_id=self.get("id"))
+
+        while url:
+
+            response = self.session.get(url)
+            responsedata = json.loads(response.text)
+
+            for data in responsedata["data"]:
+                brew = Brew(data=data)
+                self.session.register(brew)
+                self.brews.append(brew)
+                    
+            if "next_page_url" in responsedata:
+                url = responsedata["next_page_url"]
+            else:
+                break
+
+        if full:
+            for brew in self.brews:
+                brew.reload()
+
+        return self.brews
+
+
+
+class Brew(Object):
+
+    urlload = "https://brew.grainfather.com/recipes/{recipe_id}/brew-sessions/data/{id}"
+    urlsave = "https://brew.grainfather.com/recipes/{recipe_id}/brew-sessions/{id}"
+    urlcreate = "https://brew.grainfather.com/recipes/{recipe_id}/brew-sessions/"
+
+    recipe_id = None
+
+
+
+    def __init__(self, session=None, recipe=None, id=None, data=None):
+
+        if recipe and recipe.get("id"):
+            # fill in recipe_id into url templates
+            self.recipe_id = recipe.get("id")
+            self.urlload = self.urlload.format(recipe_id=self.recipe_id, id="{id}")
+            self.urlsave = self.urlsave.format(recipe_id=self.recipe_id, id="{id}")
+            self.urlcreate = self.urlcreate.format(recipe_id=self.recipe_id)
+
+        super(Brew, self).__init__(session=session, id=id, data=data)
+
+     
+
+
+    def tidy(self):
+
+        # add required fields, if missing
+        if not 'unit_type_id' in self.data:
+            self.data['unit_type_id'] = UnitType.METRIC.value;
+
+        # others
+        if not 'recipe_id' in self.data:
+            self.data['recipe_id'] = None
+
+
+
 class Fermentable(Object):
 
     # TBD... how can we access specific ingredients?
 
-    #urlload = "https://brew.grainfather.com/api/ingredients/fermentables?api_token={api_token}&id={id}"
-    #urlload = "https://brew.grainfather.com/api/ingredients/fermentables/{id}?api_token={api_token}"
     urlload = "https://brew.grainfather.com/api/ingredients/fermentables?api_token={api_token}&q={id}"
-    urlsave = None # XXX yet
-    urlcreate = None # XXX yet
+    urlsave = None
+    urlcreate = None
 
 
 
@@ -1002,9 +1663,10 @@ class Interpreter(object):
     logger = None
 
 
-    def __init__(self, kbh=None, session=None, config=None):
+    def __init__(self, kbh=None, bs=None, session=None, config=None):
 
         self.kbh = kbh
+        self.bs = bs
         self.session = session
         self.config = config
 
@@ -1014,30 +1676,63 @@ class Interpreter(object):
 
     def list(self, args):
 
+        flagBrews = False
+        flagSortNames = False
+        flagSortDates = False
+
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
 
+        try:
+            opts, args = getopt.getopt(args, "vbnd", ["verbose", "brews", "name", "date"])
+        except getopt.GetoptError as err:
+            self.logger.error(str(err))
+            return
+        for o, a in opts:
+            if o in ("-v", "--verbose"):
+                flagBrews = True
+            elif o in ("-b", "--brews"):
+                flagBrews = True
+            elif o in ("-n", "--name"):
+                flagSortNames = True
+            elif o in ("-d", "--date"):
+                flagSortDates = True
+            else:
+                assert False, "unhandled option"
+
+        # build a list of recipe names
         if len(args) >= 1:
             namepattern = args[0]
         else:
             namepattern = "*"
 
-        names = []
-
-        gf_recipes = self.session.getMyRecipes(namepattern)
-        names.extend(recipe.get("name") for recipe in gf_recipes if recipe.get("name") not in names)
+        gf_recipes = self.session.getMyRecipes(namepattern, brews=flagBrews)
+        all_recipes = gf_recipes
 
         if self.kbh:
             kbh_recipes = self.kbh.getRecipes(namepattern)
-            names.extend(recipe.get("name") for recipe in kbh_recipes if recipe.get("name") not in names)
+            for recipe in kbh_recipes:
+                if recipe.get("name") not in [r.get("name") for r in all_recipes]:
+                    all_recipes.append(recipe)
         else:
             kbh_recipes = None
 
-        names = sorted(names)
+        # sort by the requested attribute
+        if flagSortDates:
+            all_recipes = sorted(all_recipes, key=lambda r: "%s:%s" % (r.get("updated_at")[:16],r.get("name")))
+        else:
+            all_recipes = sorted(all_recipes, key=lambda r: r.get("name"))
 
-        for name in names:
-            
+        # now print the lines
+        firstLine = True
+        for name in [r.get("name") for r in all_recipes]:
+
+            if firstLine:
+                print("%8s flags %16s %16s %7s %s" % ("ID", "KBH update", "GF update", "size", "name/attributes"))
+                firstLine = False
+
+            # try to find the GF and KBH representations of the current recipe name
             gf_recipe  = next((recipe for recipe in gf_recipes  if recipe.get("name") == name), None)
             if kbh_recipes:
                 kbh_recipe = next((recipe for recipe in kbh_recipes if recipe.get("name") == name), None)
@@ -1046,18 +1741,62 @@ class Interpreter(object):
 
             recipe = gf_recipe if gf_recipe else kbh_recipe
 
-            print("%8s %s%s%s%s %16s %16s %7s %s" %
+            print("%8s r%s%s%s%s %16s %16s %7s %s" %
                   (gf_recipe.get("id") if gf_recipe else "-",
                    "k" if kbh_recipe else "-",
                    "g" if gf_recipe else "-",
                    "p" if gf_recipe and gf_recipe.get("is_public") else "-",
                    "o" if gf_recipe and kbh_recipe and kbh_recipe.get("updated_at") > gf_recipe.get("updated_at") else "-",
-
-                   self.session.utcToLocal(kbh_recipe.get("updated_at"))[:16] if kbh_recipe else "-",
-                   self.session.utcToLocal(gf_recipe.get("updated_at"))[:16] if gf_recipe else "-",
-
+                   Util.utcToLocal(kbh_recipe.get("updated_at"))[:16] if kbh_recipe else "-",
+                   Util.utcToLocal(gf_recipe.get("updated_at"))[:16] if gf_recipe else "-",
                    "%.1f" % (recipe.get("batch_size")) + "l" if recipe.get("unit_type_id") == 10 else "gal",
                    name))
+            
+            if flagBrews:
+
+                # KBH has a representation of exactly one brew per recipe
+                # TBD...
+                kbh_brew = None
+
+                if gf_recipe:
+
+                    gf_brews = gf_recipe.brews
+
+                    # TBD: sort (by date, newest last)
+                    gf_brews = sorted(gf_brews, key=lambda b: b.get("updated_at"))
+
+                    if len(gf_brews) > 0:
+                        brews = gf_brews
+                        # ...and assume the kbh_brew corresponds with the last (newest) gf_brew
+                    else:
+                        brews = []
+                        if kbh_brew:
+                            brews.append(kbh_brew)
+
+                    for brew in brews:
+
+                        if brew == brews[-1]:
+                            latest = True
+                        else:
+                            latest = False
+
+                        attrs = []
+                        attrs.append(BrewStatusType.getName(brew.get("status")))
+                        attrs = str(attrs)
+
+                        # TBD
+                        volume = brew.get("boil_volume_est")
+
+                        print("%8s b%s%s%s%s %16s %16s %7s %s" %
+                              (brew.get("id") if brew.get("id") else "-",
+                               "k" if kbh_brew and (latest == True) else "-",
+                               "g" if len(gf_brews) > 0 else "-",
+                               "p" if brew.get("is_public") else "-",
+                               "o" if kbh_brew and (latest == True) and len(gf_brews) > 0 and kbh_brew.get("updated_at") > brew.get("updated_at") else "-",
+                               Util.utcToLocal(kbh_brew.get("updated_at"))[:16] if kbh_brew and (latest == True) and len(gf_brews) > 0 else "-",
+                               Util.utcToLocal(brew.get("updated_at"))[:16] if len(gf_brews) > 0 else "-",
+                               "%.1f" % (volume) + "l" if brew.get("unit_type_id") == 10 else "gal",
+                               attrs))
 
 
 
@@ -1163,8 +1902,8 @@ class Interpreter(object):
             self.logger.error("No name supplied")
             return
 
-        kbh_recipe = self.kbh.getRecipe(namepattern)
-        gf_recipe = self.session.getMyRecipe(namepattern)
+        kbh_recipe = self.kbh.getRecipe(namepattern=namepattern)
+        gf_recipe = self.session.getMyRecipe(namepattern=namepattern)
 
         if kbh_recipe and gf_recipe:
         
@@ -1219,6 +1958,59 @@ class Interpreter(object):
 
 
 
+    def test(self, args):
+
+        if not self.session:
+            self.logger.error("No Grainfather session, use -u and -p/-P options")
+            return
+
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            namepattern = "*"
+
+        bs_recipes = self.bs.getRecipes(namepattern=namepattern)
+        self.logger.info("found %d BS recipes" % len(bs_recipes))
+#        if len(bs_recipes) == 0:
+#            return
+
+        gf_recipes = self.session.getMyRecipes(namepattern=namepattern)
+        self.logger.info("found %d GF recipes" % len(gf_recipes))
+
+        kbh_recipes = self.kbh.getRecipes(namepattern=namepattern)
+        self.logger.info("found %d KBH recipes" % len(kbh_recipes))
+
+        for bs_recipe in bs_recipes:
+
+            # try to find matching GF recipe
+            id = None
+            for gf_recipe in gf_recipes:
+                if gf_recipe.get("name") == bs_recipe.get("name"):
+                    id = gf_recipe.get("id")
+                    break
+                
+            print(json.dumps(bs_recipe.data, sort_keys=True, indent=4))
+
+            if id:
+                if ((gf_recipe.get("updated_at")[:10] + "T00:00:00.000000Z") > bs_recipe.get("updated_at")) and (not self.session.force):
+                    self.logger.info("%s needs no update" % gf_recipe)
+                    self.logger.debug("bs:%s, gf:%s" % (bs_recipe.get("updated_at"), gf_recipe.get("updated_at")))
+                else:
+                    self.session.register(bs_recipe, id=id)
+                    self.logger.info("Updating %s" % gf_recipe)
+                    self.logger.debug("bs:%s, gf:%s" % (bs_recipe.get("updated_at"), gf_recipe.get("updated_at")))
+                    bs_recipe.save()
+            else:
+                self.logger.info("Creating %s" % bs_recipe)
+                self.session.register(bs_recipe)
+                bs_recipe.save()
+
+#        print(json.dumps(r.data, sort_keys=True, indent=4))
+#        r.recalculate(force=True)
+#        print(json.dumps(r.data, sort_keys=True, indent=4))
+
+
+
 def usage():
     print("""Usage: %s [options] [command [argument] ]
   -v           --verbose             increase the logging level
@@ -1233,6 +2025,7 @@ def usage():
   -P file      --pwfile file         read password from file
   -l           --logout              logout (instead of keeping session persistent)
   -k file      --kbhfile file        Kleiner Brauhelfer database file
+  -b file      --bsdir dir           BeerSmith3 database directory
 Commands:
   list ["namepattern"]               list user's recipes
   dump ["namepattern"]               dump user's recipes 
@@ -1262,6 +2055,7 @@ def main():
     level = None
     session = None
     kbh = None
+    bs = None
     dryrun = False
     force = False
     logout = False
@@ -1280,7 +2074,9 @@ def main():
         stateFile = "~/.grainfather.state",
         username = None,
         password = None,
-        kbhFile = "~/.kleiner-brauhelfer/kb_daten.sqlite"
+        kbhFile = "~/.kleiner-brauhelfer/kb_daten.sqlite",
+        bsDir = "~/Documents/BeerSmith3",
+        bsPattern = "Sync"
         )
     
     config = mergeConfig(config, config["globalConfigFile"], notify=False)
@@ -1288,8 +2084,8 @@ def main():
 
     try:
         opts, args = getopt.getopt(sys.argv[1:],
-                                   "vdqsnfhc:u:p:P:lk:",
-                                   ["verbose", "debug", "quiet", "syslog", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "logout", "kbhfile="])
+                                   "vdqsnfhc:u:p:P:lk:b:",
+                                   ["verbose", "debug", "quiet", "syslog", "dryrun", "force", "help", "config=", "user=", "password=", "pwfile=", "logout", "kbhfile=", "bsdir="])
     except getopt.GetoptError as err:
         print(str(err))
         usage()
@@ -1353,6 +2149,9 @@ def main():
         elif o in ("-k", "--kbhfile"):
             config["kbhFile"] = a
 
+        elif o in ("-b", "--bsdir"):
+            config["bsDir"] = a
+
         else:
             assert False, "unhandled option"
 
@@ -1370,7 +2169,10 @@ def main():
     if (config["kbhFile"]):
         kbh = KleinerBrauhelfer(os.path.expanduser(config["kbhFile"]))
 
-    interpreter = Interpreter(kbh=kbh, session=session, config=config)
+    if (config["bsDir"]):
+        bs = BeerSmith3(dir=os.path.expanduser(config["bsDir"]), pattern=config["bsPattern"])
+
+    interpreter = Interpreter(kbh=kbh, bs=bs, session=session, config=config)
 
     op = None
     arg = None

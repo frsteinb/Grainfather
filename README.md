@@ -102,6 +102,14 @@ problems. Feedback and contributions are welcome, preferably on the
 GitHub site at https://github.com/frsteinb/Grainfather as issues or
 pull requests.
 
+### Limitations
+
+- Brew sessions are not supported.
+- We use the recipe name as unique identifiers for syncing decisions,
+  i.e. there must be no two recipes with identical names.
+- Once brew sessions are supported, we will assume that the single KBH brew
+  corresponds with the latest GF brew.
+
 ### Usage Example
 
 ```
@@ -171,6 +179,9 @@ INFO:session:PUT https://brew.grainfather.com/recipes/181574 -> 200
 ```
 
 ### TODO
+
+- separate attributes of the recipe from actual brew data, e.g. fg, abv, ...
+- maybe *calculate* estimated fg?
 
 - allow a separator to suppress parts of KBH comments
 - implement more KBH [[]]-tags (e.g. malt-ppg)
