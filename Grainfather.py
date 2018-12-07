@@ -42,7 +42,6 @@ import dateutil
 import dateutil.tz
 import subprocess
 import http.client
-import pyinotify
 import asyncio
 from enum import Enum
 import lxml.etree
@@ -512,12 +511,16 @@ class KleinerBrauhelfer(object):
                 value = re.sub(pattern, r'\1', line, re.IGNORECASE)
 
         if default != None:
+
             if default.__class__.__name__ == "bool":
                 if str(value).lower() in [ "1", "true", "y", "yes", "ja" ]:
                     value = True
                 #if str(value).lower() in [ "0", "false", "n", "no", "nein" ]:
                 else:
                     value = False
+
+            if (default.__class__.__name__ == "int") or (default.__class__.__name__ == "float"):
+                value = float(str(value).replace(",","."))
                     
         return value
 
@@ -611,7 +614,12 @@ class KleinerBrauhelfer(object):
         c.execute("SELECT * FROM Malzschuettung WHERE SudID = ? ORDER BY Prozent DESC", (sud["ID"],))
         malze = c.fetchall()
         for malz in malze:
-            ausbeute = self.extractFromText(malz["Kommentar"], "Ausbeute", default=80)
+            c.execute("SELECT * FROM Malz WHERE Beschreibung = ?", (malz["Name"],))
+            malz0 = c.fetchone()
+            if malz0:
+                ausbeute = self.extractFromText(malz0["Bemerkung"], "Ausbeute", default=80)
+            else:
+                ausbeute = 80
             ppg = float("%.1f" % (Util.yieldToPpg(ausbeute)))
             data["fermentables"].append({
                     "name": malz["Name"],
@@ -857,7 +865,7 @@ class KleinerBrauhelfer(object):
         # finally create the Recipe and Brew objects from the dicts
         r = Recipe(data=data, brew_data=brew_data)
 
-        r.recalculate()
+        r.recalculate(force=False)
 
         return r
 
@@ -942,7 +950,10 @@ class Session(object):
 
         response = self.session.get(url, headers=self.headers, cookies=self.cookies, allow_redirects=False)
         self.logger.info("GET %s -> %s" % (url, response.status_code))
-        if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+        print("XXX HEADERS: ")
+        print(response.headers)
+        print("XXX HEADERS. ")
+        if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
             if relogin:
                 # if the response seems to be the login page
                 self.login()
@@ -957,7 +968,7 @@ class Session(object):
         if (self.readonly == False) or force:
             response = self.session.post(url, headers=self.headers, cookies=self.cookies, data=data, json=json, files=files, allow_redirects=False)
             self.logger.info("POST %s -> %s" % (url, response.status_code))
-            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+            if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
                 if relogin:
                     # if the response seems to be the login page
                     self.login()
@@ -975,7 +986,7 @@ class Session(object):
         if (self.readonly == False) or force:
             response = self.session.put(url, headers=self.headers, cookies=self.cookies, data=data, json=json, allow_redirects=False)
             self.logger.info("PUT %s -> %s" % (url, response.status_code))
-            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+            if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
                 if relogin:
                     # if the response seems to be the login page
                     self.login()
@@ -993,7 +1004,7 @@ class Session(object):
         if (self.readonly == False) or force:
             response = self.session.delete(url, headers=self.headers, cookies=self.cookies, allow_redirects=False)
             self.logger.info("DELETE %s -> %s" % (url, response.status_code))
-            if (response.status_code == 302) and ("/login" in response.headers["Location"]):
+            if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
                 if relogin:
                     # if the response seems to be the login page
                     self.login()
@@ -1064,34 +1075,34 @@ class Session(object):
 
     def login(self):
         
-            # fetch the login page
-            response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
+        # fetch the login page
+        response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
 
-            # pick the form_key from the login form
-            form_key = None
-            for line in response.text.splitlines():
-                if "form_key" in line:
-                    form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
-            if (not form_key):
-                self.logger.error("Could not fetch form_key from login page")
+        # pick the form_key from the login form
+        form_key = None
+        for line in response.text.splitlines():
+            if "form_key" in line:
+                form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
+        if (not form_key):
+            self.logger.error("Could not fetch form_key from login page")
 
-            # post to the login form
-            payload = {'form_key': form_key, 'login[username]': self.username, 'login[password]': self.password}
-            response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False)
+        # post to the login form
+        payload = {'form_key': form_key, 'login[username]': self.username, 'login[password]': self.password}
+        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False)
 
-            # fetch start page from the recipe creator
-            response = self.get("https://brew.grainfather.com", relogin=False)
+        # fetch start page from the recipe creator
+        response = self.get("https://brew.grainfather.com", relogin=False)
 
-            # pick session metadata from response and set the CSRF token for this session
-            self.metadata = None
-            for line in response.text.splitlines():
-                if "window.Grainfather" in line:
-                    s = re.sub(r'window.Grainfather *= *', r'', line)
-                    self.metadata = json.loads(s)
-            if (not self.metadata):
-                self.logger.error("Could not fetch session metadata from login response")
+        # pick session metadata from response and set the CSRF token for this session
+        self.metadata = None
+        for line in response.text.splitlines():
+            if "window.Grainfather" in line:
+                s = re.sub(r'window.Grainfather *= *', r'', line)
+                self.metadata = json.loads(s)
+        if (not self.metadata):
+            self.logger.error("Could not fetch session metadata from login response")
 
-            self.saveState(response)
+        self.saveState(response)
 
 
 
@@ -1534,7 +1545,7 @@ class Recipe(Object):
         if (force) or (not "calories" in self.data) or (self.data["calories"] == None) or (float(self.data["calories"]) <= 0.0):
             self.data["calories"] = round(1881.22 * self.data["fg"] * (self.data["og"] - self.data["fg"]) / (1.775 - self.data["og"]) + 3550.0 * self.data["fg"] * (0.1808 * self.data["og"] + 0.8192 * self.data["fg"] - 1.0004))
 
-        print("XXX attenuation:%s totalGravityPoints:%s postboil:%s og:%s" % (attenuation, totalGravityPoints, postBoilVolume, self.data["og"]))
+        #print("XXX attenuation:%s totalGravityPoints:%s postboil:%s og:%s" % (attenuation, totalGravityPoints, postBoilVolume, self.data["og"]))
 
         earlyOG = 1.0 + earlyGravityPoints / 1000
             
@@ -1560,7 +1571,7 @@ class Recipe(Object):
                         ibu *= 0.2
                     elif hop["hop_usage_type_id"] == HopUsageType.FIRSTWORT.value:
                         ibu *= 1.1 # Note: other sources say that first worst hopping leads to slightly _less_ bitterness ?!
-                    print("XXX earlyOG:%s postboil:%s aa:%s amount:%s factor:%s util:%s time:%s  -> ibu:%s" % (earlyOG, postBoilVolume, hop["aa"], hop["amount"], factor, utilization, time, ibu))
+                    #print("XXX earlyOG:%s postboil:%s aa:%s amount:%s factor:%s util:%s time:%s  -> ibu:%s" % (earlyOG, postBoilVolume, hop["aa"], hop["amount"], factor, utilization, time, ibu))
                     totalIBU += ibu
                 if (force) or (not "ibu" in hop) or (hop["ibu"] == None):
                     hop["ibu"] = float("%0.01f" % ibu)
@@ -1952,6 +1963,12 @@ class Interpreter(object):
 
 
 
+    def login(self, args):
+
+        self.session.login()
+
+
+
     def logout(self, args):
 
         self.session.logout()
@@ -1971,14 +1988,12 @@ class Interpreter(object):
 
         bs_recipes = self.bs.getRecipes(namepattern=namepattern)
         self.logger.info("found %d BS recipes" % len(bs_recipes))
-#        if len(bs_recipes) == 0:
-#            return
-
-        gf_recipes = self.session.getMyRecipes(namepattern=namepattern)
-        self.logger.info("found %d GF recipes" % len(gf_recipes))
 
         kbh_recipes = self.kbh.getRecipes(namepattern=namepattern)
         self.logger.info("found %d KBH recipes" % len(kbh_recipes))
+
+        gf_recipes = self.session.getMyRecipes(namepattern=namepattern)
+        self.logger.info("found %d GF recipes" % len(gf_recipes))
 
         for bs_recipe in bs_recipes:
 

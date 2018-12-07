@@ -178,7 +178,25 @@ INFO:interpreter:Updating <current Recipe id 181574 named "#014 PIPA">
 INFO:session:PUT https://brew.grainfather.com/recipes/181574 -> 200
 ```
 
+### Some Hints
+
+- In KBH, recipes are created by referring ingredients from the database.
+  If you want to be able to export recipes much later, when the ingredents
+  are out of stock, these reference should still be intact. Therefore, you
+  should not delete ingredients from the database, even if they gone for
+  a long time. In a similar sense, you should not edit ingredients, i.e.,
+  if a newer hop charge of the same hop comes with a differen alpha acid
+  level. It is better to create a new ingredients database entry. To
+  differentiate ingredients, you could make the production or puchase
+  date part of the ingredient name.
+
+- In BeerSmith, recipes contain complete copies of all ingredients.
+  Therefore, with BeerSmith this problem does not exist.
+
 ### TODO
+
+- work on BeerSmith support has just begun, hence, on this part lots
+  of improvements, debugging, documentation ist needed.
 
 - separate attributes of the recipe from actual brew data, e.g. fg, abv, ...
 - maybe *calculate* estimated fg?
