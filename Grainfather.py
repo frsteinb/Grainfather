@@ -946,13 +946,13 @@ class Session(object):
 
 
 
-    def get(self, url, relogin=True):
+    def get(self, url, relogin=True, redirect=False):
 
-        response = self.session.get(url, headers=self.headers, cookies=self.cookies, allow_redirects=False)
+        response = self.session.get(url, headers=self.headers, cookies=self.cookies, allow_redirects=redirect)
         self.logger.info("GET %s -> %s" % (url, response.status_code))
-        print("XXX HEADERS: ")
-        print(response.headers)
-        print("XXX HEADERS. ")
+        #print("XXX HEADERS: ")
+        #print(response.headers)
+        #print("XXX HEADERS. ")
         if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
             if relogin:
                 # if the response seems to be the login page
@@ -963,10 +963,10 @@ class Session(object):
 
 
 
-    def post(self, url, data=None, json=None, files=None, force=False, relogin=True):
+    def post(self, url, data=None, json=None, files=None, force=False, relogin=True, redirect=False):
 
         if (self.readonly == False) or force:
-            response = self.session.post(url, headers=self.headers, cookies=self.cookies, data=data, json=json, files=files, allow_redirects=False)
+            response = self.session.post(url, headers=self.headers, cookies=self.cookies, data=data, json=json, files=files, allow_redirects=redirect)
             self.logger.info("POST %s -> %s" % (url, response.status_code))
             if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
                 if relogin:
@@ -1076,20 +1076,52 @@ class Session(object):
     def login(self):
         
         # fetch the login page
-        response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
+        #response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
+        response = self.get("https://brew.grainfather.com/login/", relogin=False, redirect=True)
+
+        # there seems to be another redirection...
+        #newurl = response.headers["Location"]
+        #response = self.get(newurl, relogin=False)
+
+        # ???
 
         # pick the form_key from the login form
         form_key = None
+        oauth_token = None
         for line in response.text.splitlines():
             if "form_key" in line:
                 form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
+            if "oauth_token" in line:
+                oauth_token = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
         if (not form_key):
             self.logger.error("Could not fetch form_key from login page")
 
         # post to the login form
-        payload = {'form_key': form_key, 'login[username]': self.username, 'login[password]': self.password}
-        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False)
+        payload = {'form_key': form_key, 'oauth_token': oauth_token, 'login[username]': self.username, 'login[password]': self.password}
+        response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False, redirect=True)
 
+        #print("XXX1 LOGIN POST")
+        #print(payload)
+        #print("XXX LOGIN POST RESPONSE->Location")
+        #print(response.headers["Location"])
+        #print("XXX1.")
+
+        #response = self.post("https://brew.grainfather.com/", data=payload, relogin=False, redirect=False)
+
+        #print("XXX LOGIN POST 2")
+        #print(payload)
+        #print("XXX LOGIN POST RESPONSE->Location")
+        #print(response.headers["Location"])
+        #print("XXX 2.")
+
+        response = self.get("https://brew.grainfather.com/whats-new-notifications/data?page=1", relogin=False, redirect=False)
+        #print("XXX 3")
+        #print(payload)
+        #print("XXX LOGIN POST RESPONSE->Location")
+        #print(response.headers["Location"])
+        #print("XXX 3.")
+
+        
         # fetch start page from the recipe creator
         response = self.get("https://brew.grainfather.com", relogin=False)
 
@@ -1103,6 +1135,10 @@ class Session(object):
             self.logger.error("Could not fetch session metadata from login response")
 
         self.saveState(response)
+
+        response = self.get("https://brew.grainfather.com/api/terms-and-conditions/data?api_token=%s" % (self.metadata["user"]["api_token"]), relogin=False, redirect=False)
+
+
 
 
 

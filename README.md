@@ -2,6 +2,12 @@
 
 ## A tool for syncing brew recipes from "Kleiner Brauhelfer" to the Grainfather brew community database
 
+### IMPORTANT NOTE
+
+Recent changes on Grainfather's backend rendered this code unusable,
+because authentication is no longer working. My spare time is limited,
+so that was not yet able to adapt this code.
+
 ### Introduction
 
 [Grainfather][1] is the name of a series of home brewing equipment
