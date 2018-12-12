@@ -938,11 +938,11 @@ class Session(object):
     
     session = None
     username = None
-    metadata = None
     logger = None
     readonly = False
     headers = {}
-    cookies = None
+    cookies = {}
+    state = {}
 
 
 
@@ -950,9 +950,6 @@ class Session(object):
 
         response = self.session.get(url, headers=self.headers, cookies=self.cookies, allow_redirects=redirect)
         self.logger.info("GET %s -> %s" % (url, response.status_code))
-        #print("XXX HEADERS: ")
-        #print(response.headers)
-        #print("XXX HEADERS. ")
         if (response.status_code == 401) or ((response.status_code == 302) and ("/login" in response.headers["Location"])):
             if relogin:
                 # if the response seems to be the login page
@@ -1020,26 +1017,24 @@ class Session(object):
     def saveState(self, response):
         
         # save session information persistently for subsequent program calls
-        state = dict(
-            username = self.username,
-            metadata = self.metadata,
-            cookies = response.cookies.get_dict()
-            )
+        self.state["username"] = self.username
+        self.state["cookies"] = response.cookies.get_dict()
         with open(os.path.expanduser(self.stateFile), "w") as f:
-            json.dump(state, f, sort_keys=True, indent=4)
+            json.dump(self.state, f, sort_keys=True, indent=4)
         self.logger.info("Saved session state to %s" % (self.stateFile))
+
 
 
     def loadState(self):
 
         try:
             f = open(os.path.expanduser(self.stateFile))
-            state = json.load(f)
+            self.state = json.load(f)
             f.close()
-            self.username = state["username"]
-            self.metadata = state["metadata"]
-            self.headers.update({'X-CSRF-TOKEN': self.metadata["csrfToken"]})
-            self.cookies = state["cookies"]
+            self.username = self.state["username"]
+            self.cookies.update(self.state["cookies"])
+            self.headers.update({'X-CSRF-TOKEN': self.state["csrfToken"]})
+            self.headers.update({'X-XSRF-TOKEN': self.state["xsrfToken"]})
             self.logger.info("Read session state from %s" % (self.stateFile))
         except Exception as error:
             self.logger.debug("No valid session state found at %s: %s" % (self.stateFile, error))
@@ -1065,25 +1060,19 @@ class Session(object):
 
         self.session = requests.session()
 
+        # seems to be necessary:
+        self.headers.update({'User-Agent': "Mozilla/5.0 (or something else)" })
+        self.cookies.update({'_ga_ssr': "-658533274" })
+
         if self.stateFile:
             self.loadState()
-
-        if not self.metadata:
-            self.login()
 
 
 
     def login(self):
         
-        # fetch the login page
-        #response = self.get("https://oauth.grainfather.com/customer/account/login/", relogin=False)
-        response = self.get("https://brew.grainfather.com/login/", relogin=False, redirect=True)
-
-        # there seems to be another redirection...
-        #newurl = response.headers["Location"]
-        #response = self.get(newurl, relogin=False)
-
-        # ???
+        # fetch start page, we expect to get redirected to oauth login page
+        response = self.get("https://brew.grainfather.com/login", relogin=False, redirect=True)
 
         # pick the form_key from the login form
         form_key = None
@@ -1093,52 +1082,41 @@ class Session(object):
                 form_key = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
             if "oauth_token" in line:
                 oauth_token = re.sub(r'^.*value="([a-zA-Z_0-9]*).*$', r'\1', line)
-        if (not form_key):
-            self.logger.error("Could not fetch form_key from login page")
+        if (not form_key or not oauth_token):
+            self.logger.error("Could not fetch form_key and/or oauth_token from login page")
+            return
 
         # post to the login form
         payload = {'form_key': form_key, 'oauth_token': oauth_token, 'login[username]': self.username, 'login[password]': self.password}
         response = self.post("https://oauth.grainfather.com/customer/account/loginPost/", data=payload, relogin=False, redirect=True)
 
-        #print("XXX1 LOGIN POST")
-        #print(payload)
-        #print("XXX LOGIN POST RESPONSE->Location")
-        #print(response.headers["Location"])
-        #print("XXX1.")
+        self.state["xsrfToken"] = response.cookies.get_dict()["XSRF-TOKEN"]
 
-        #response = self.post("https://brew.grainfather.com/", data=payload, relogin=False, redirect=False)
-
-        #print("XXX LOGIN POST 2")
-        #print(payload)
-        #print("XXX LOGIN POST RESPONSE->Location")
-        #print(response.headers["Location"])
-        #print("XXX 2.")
-
-        response = self.get("https://brew.grainfather.com/whats-new-notifications/data?page=1", relogin=False, redirect=False)
-        #print("XXX 3")
-        #print(payload)
-        #print("XXX LOGIN POST RESPONSE->Location")
-        #print(response.headers["Location"])
-        #print("XXX 3.")
-
+        #response = self.get("https://brew.grainfather.com/whats-new-notifications/data?page=1", relogin=False, redirect=False)
         
         # fetch start page from the recipe creator
         response = self.get("https://brew.grainfather.com", relogin=False)
 
         # pick session metadata from response and set the CSRF token for this session
-        self.metadata = None
+        metadata = None
         for line in response.text.splitlines():
             if "window.Grainfather" in line:
                 s = re.sub(r'window.Grainfather *= *', r'', line)
-                self.metadata = json.loads(s)
-        if (not self.metadata):
+                metadata = json.loads(s)
+        if (not metadata):
             self.logger.error("Could not fetch session metadata from login response")
+
+        self.state["csrfToken"] = metadata["csrfToken"]
+        self.state["api_token"] = metadata["user"]["api_token"]
+
+        self.headers.update({'X-CSRF-TOKEN': self.state["csrfToken"]})
+        self.headers.update({'X-XSRF-TOKEN': self.state["xsrfToken"] })
 
         self.saveState(response)
 
-        response = self.get("https://brew.grainfather.com/api/terms-and-conditions/data?api_token=%s" % (self.metadata["user"]["api_token"]), relogin=False, redirect=False)
+        #response = self.get("https://brew.grainfather.com/api/terms-and-conditions/data?api_token=%s" % (self.state["api_token"]), relogin=False, redirect=True)
 
-
+        #response = self.get("https://brew.grainfather.com/my-recipes")
 
 
 
@@ -1352,7 +1330,7 @@ class Object(object):
         if not id:
             id = self.data["id"]
 
-        response = self.session.get(self.urlload.format(api_token=self.session.metadata["user"]["api_token"], id=id))
+        response = self.session.get(self.urlload.format(api_token=self.session.state["api_token"], id=id))
         self.data = json.loads(response.text)
 
 
@@ -1365,9 +1343,9 @@ class Object(object):
         self.tidy()
 
         if self.isBound():
-            response = self.session.put(self.urlsave.format(api_token=self.session.metadata["user"]["api_token"], id=self.data["id"]), json=self.data)
+            response = self.session.put(self.urlsave.format(api_token=self.session.state["api_token"], id=self.data["id"]), json=self.data)
         else:
-            response = self.session.post(self.urlcreate.format(api_token=self.session.metadata["user"]["api_token"]), json=self.data)
+            response = self.session.post(self.urlcreate.format(api_token=self.session.state["api_token"]), json=self.data)
 
         if response:
             self.data = json.loads(response.text)
@@ -1376,7 +1354,7 @@ class Object(object):
 
     def delete(self):
 
-        response = self.session.delete(self.urlsave.format(api_token=self.session.metadata["user"]["api_token"], id=self.data["id"]))
+        response = self.session.delete(self.urlsave.format(api_token=self.session.state["api_token"], id=self.data["id"]))
 
 
 
@@ -1581,8 +1559,6 @@ class Recipe(Object):
         if (force) or (not "calories" in self.data) or (self.data["calories"] == None) or (float(self.data["calories"]) <= 0.0):
             self.data["calories"] = round(1881.22 * self.data["fg"] * (self.data["og"] - self.data["fg"]) / (1.775 - self.data["og"]) + 3550.0 * self.data["fg"] * (0.1808 * self.data["og"] + 0.8192 * self.data["fg"] - 1.0004))
 
-        #print("XXX attenuation:%s totalGravityPoints:%s postboil:%s og:%s" % (attenuation, totalGravityPoints, postBoilVolume, self.data["og"]))
-
         earlyOG = 1.0 + earlyGravityPoints / 1000
             
         if ("hops" in self.data) and (len(self.data["hops"]) > 0):
@@ -1607,7 +1583,7 @@ class Recipe(Object):
                         ibu *= 0.2
                     elif hop["hop_usage_type_id"] == HopUsageType.FIRSTWORT.value:
                         ibu *= 1.1 # Note: other sources say that first worst hopping leads to slightly _less_ bitterness ?!
-                    #print("XXX earlyOG:%s postboil:%s aa:%s amount:%s factor:%s util:%s time:%s  -> ibu:%s" % (earlyOG, postBoilVolume, hop["aa"], hop["amount"], factor, utilization, time, ibu))
+
                     totalIBU += ibu
                 if (force) or (not "ibu" in hop) or (hop["ibu"] == None):
                     hop["ibu"] = float("%0.01f" % ibu)
