@@ -2,7 +2,7 @@
 """
 grainfather - Manage Grainfather community brew recipes
 
-Copyright (C) 2018 Frank Steinberg <frank@familie-steinberg.org>
+Copyright (C) 2018-2019 Frank Steinberg <frank@familie-steinberg.org>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -60,6 +60,9 @@ class Util(object):
 
 
     def localToUtc(t):
+
+        if len(t) == 10:
+            t = "%sT00:00:00" % t
 
         u = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", 
                           time.gmtime(time.mktime(time.strptime(t, "%Y-%m-%dT%H:%M:%S"))))
@@ -119,6 +122,24 @@ class Util(object):
     def gToOz(value):
 
         return value * 0.035274
+
+
+    
+    def waterGravity(t):
+
+        return (999.83952 + t * 16.952577 + pow(t,2) * -0.0079905127 + pow(t,3) * -0.000046241757 + pow(t,4) * 0.00000010584601 + pow(t,5) * -0.00000000028103006) / (1 + t * 0.016887236)
+
+
+    
+    def volAtTemp(v1, t1, t2):
+        
+        g1 = Util.waterGravity(t1)
+        g2 = Util.waterGravity(t2)
+
+        return (g1 * v1) / g2
+
+
+
 
 
 
@@ -495,6 +516,36 @@ class KleinerBrauhelfer(object):
 
 
 
+    def extractFromArray(self, array, tag, default=None):
+
+        """Extracts a value from a given array of texts addressed by a given tag.
+        This is used to encode some special attributes in KBH comment fields
+        that are not otherwise represented in the KBH database. E.g.
+        some equipment profile attributes stored in separate rows of "Geraete"."""
+
+        value = default
+        
+        for line in array:
+            if ("[[%s:" % (tag)) in line:
+                pattern = r'^.*\[\[' + re.escape(tag) + r' *: *([^\]]*)\]\].*$'
+                value = re.sub(pattern, r'\1', line, re.IGNORECASE)
+
+        if default != None:
+
+            if default.__class__.__name__ == "bool":
+                if str(value).lower() in [ "1", "true", "y", "yes", "ja" ]:
+                    value = True
+                #if str(value).lower() in [ "0", "false", "n", "no", "nein" ]:
+                else:
+                    value = False
+
+            if (default.__class__.__name__ == "int") or (default.__class__.__name__ == "float"):
+                value = float(str(value).replace(",","."))
+                    
+        return value
+
+
+
     def extractFromText(self, text, tag, default=None):
 
         """Extracts a value from a given text addressed by a given tag.
@@ -534,6 +585,24 @@ class KleinerBrauhelfer(object):
 
         c = self.conn.cursor()
 
+        c.execute("SELECT * FROM Ausruestung WHERE Name = ?", (sud["AuswahlBrauanlageName"],))
+        a = c.fetchall()
+        if len(a) > 0:
+            anlage = a[0]
+            anlagensudhausausbeute = anlage["Sudhausausbeute"]
+            anlagenid = anlage["AnlagenID"]
+        else:
+            anlage = {}
+            anlagensudhausausbeute = 62 # TBD estimate
+            anlagenid = None
+
+        geraete = []
+        if anlagenid:
+            c.execute("SELECT * FROM Geraete WHERE AusruestungAnlagenID = ?", (anlagenid,))
+            a = c.fetchall()
+            for item in a:
+                geraete.append(item["Bezeichnung"])
+
         restextrakt = 0
 
         c.execute("SELECT * FROM Hauptgaerverlauf WHERE SudID = ? ORDER BY Zeitstempel", (sud["ID"],))
@@ -572,14 +641,41 @@ class KleinerBrauhelfer(object):
         data = {}
         brew_data = {}
 
-        data["name"] = sud["Sudname"]
+        data["name"] = sud["Sudname"].strip()
         if sud["erg_Alkohol"] > 0:
-            data["abv"] = sud["erg_Alkohol"]
-        data["batch_size"] = sud["WuerzemengeAnstellen"]
-        data["boil_size"] = sud["WuerzemengeKochende"] # TBD: at start or end of boil?
+            brew_data["source_abv"] = sud["erg_Alkohol"]
+        data["batch_size"] = sud["Menge"]
+        brew_data["ferment_volume_actual"] = sud["WuerzemengeAnstellen"]
+
         data["boil_time"] = sud["KochdauerNachBitterhopfung"]
-        data["og"] = float("%.03f" % Util.platoToGravity(sud["SWAnstellen"]))
-        data["fg"] = float("%.03f" % Util.platoToGravity(restextrakt))
+        brew_data["boil_time"] = data["boil_time"]
+        brew_data["boil_time_actual"] = brew_data["boil_time"]
+        data["planned_og"] = float("%.03f" % Util.platoToGravity(sud["SW"]))
+        #data["og"] = float("%.03f" % Util.platoToGravity(sud["SW"]))
+        brew_data["original_gravity"] = float("%.03f" % Util.platoToGravity(sud["SWAnstellen"]))
+        #data["fg"] = float("%.03f" % Util.platoToGravity(restextrakt)) # TBD
+        brew_data["final_gravity"] = float("%.03f" % Util.platoToGravity(restextrakt))
+
+        # I asked Mel at GF chat:
+        # "boil_volume_actual" is meant at the beginning of the boil at 99 °C
+        # "post_boil_volume" is meant at the end of the boil at 99 °C
+        brew_data["post_boil_volume"] = sud["WuerzemengeKochende"]
+        # We calculate expected values based on the KBH formulas:
+        factor = float(sud["highGravityFaktor"])
+        if factor == 0:
+            factor = 1.0
+        vol = float(sud["Menge"]) / factor
+        vol20 = vol + vol * ((float(anlage["Verdampfungsziffer"]) * float(sud["KochdauerNachBitterhopfung"])) / (60 * 100))
+        vol99start = Util.volAtTemp(vol20, 20, 99)
+        brew_data["boil_volume_est"] = float("%.1f" % vol99start)
+        brew_data["boil_volume_actual"] = brew_data["boil_volume_est"]
+        vol99end = Util.volAtTemp(float(sud["Menge"]), 20, 99)
+        brew_data["post_boil_volume"] = float("%.1f" % vol99end)
+        if sud["BierWurdeGebraut"]:
+            extrakt = sud["SWAnstellen"]
+        else:
+            extrakt = sud["SW"]
+        brew_data["pre_boil_gravity"] = float("%.03f" % Util.platoToGravity(extrakt * factor / vol99start * vol99end))
 
         # formula from https://brauerei.mueggelland.de/vergaerungsgrad.html
         stammwuerze = float(sud["SWAnstellen"])
@@ -588,25 +684,79 @@ class KleinerBrauhelfer(object):
         abw = (stammwuerze - wfg) / (2.0665 - 0.010665 * stammwuerze);
         kcal = round((6.9 * abw + 4 * ( wfg - 0.1 )) * 10 * 0.1 * d);
         # we reverse engineered this calories factor
-        data["calories"] = round(kcal * 3.55)
+        #brew_data["calories"] = round(kcal * 3.55) # TBD write to notes?!
         # dates seem to be overwritten by the GF server
         data["created_at"] = Util.localToUtc(sud["Erstellt"])
+        #brew_data["created_at"] = data["created_at"] # no, this is actually the brew day
+        brew_data["created_at"] = "%sT00:00:00.000000Z" % sud["Braudatum"][:10]
         data["updated_at"] = Util.localToUtc(sud["Gespeichert"])
+        brew_data["updated_at"] = data["updated_at"]
         # pick description from first paragraph of "Kommentar"
-        data["description"] = sud["Kommentar"].splitlines()[0]
-        data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0))
-        data["ibu"] = sud["IBU"]
-        data["bggu"] = float(data["ibu"]) / (float(data["og"]) - 1.0) / 1000
-        if sud["WuerzemengeAnstellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
-            data["losses"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["WuerzemengeAnstellen"]))
+        data["description"] = sud["Kommentar"].splitlines()[0].strip()
+        data["efficiency"] = float("%.2f" % (anlagensudhausausbeute / 100.0)) / 0.8 # TBD recalc factor
+        #brew_data["efficiency"] = float("%.2f" % (sud["erg_Sudhausausbeute"] / 100.0)) / 0.8 # TBD recalc factor --> TBD write to notes
+        data["planned_ibu"] = sud["IBU"] # TBD write to recipe notes?!
+
+        value = float(self.extractFromArray(geraete, "Grainfather Trub and Chiller Loss", "-1").replace(",","."))
+        if value and value >= 0:
+            brew_data["brew_kettle_loss"] = value
+            data["losses"] = brew_data["brew_kettle_loss"]
         else:
-            data["losses"] = 2.0 # default losses by trub and chiller
-        data["notes"] = re.sub(r'\[\[[^\]]*\]\]\n?', r'', sud["Kommentar"])
-        data["srm"] = float("%.1f" % (float(sud["erg_Farbe"]) * 0.508))
+            if sud["WuerzemengeAnstellen"] > 0 and sud["WuerzemengeVorHopfenseihen"] > 0:
+                brew_data["brew_kettle_loss"] = float("%.1f" % (sud["WuerzemengeVorHopfenseihen"] - sud["WuerzemengeAnstellen"]))
+                if brew_data["brew_kettle_loss"] < 0.0:
+                    brew_data["brew_kettle_loss"] = 2.0 # default losses by trub and chiller
+            else:
+                brew_data["brew_kettle_loss"] = 2.0 # default losses by trub and chiller
+            data["losses"] = brew_data["brew_kettle_loss"] # TBD really identical?!
+
+        value = float(self.extractFromArray(geraete, "Grainfather Wort Shrinkage", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["wort_shrinkage"] = value / 100
+
+        value = float(self.extractFromArray(geraete, "Grainfather Mash Tun Loss", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["mash_tun_loss"] = value
+
+        value = float(self.extractFromArray(geraete, "Grainfather Boil Loss", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["boil_loss"] = value
+
+        value = float(self.extractFromArray(geraete, "Grainfather Grain Absorption", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["mash_grain_absorption"] = value
+
+        value = float(self.extractFromArray(geraete, "Grainfather Sparge Grain Absorption", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["sparge_grain_absorption"] = value
+
+        value = float(self.extractFromText(sud["Kommentar"], "Maische-pH", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["mash_ph"] = value
+        else:
+            value = float(self.extractFromArray(geraete, "Maische-pH", "-1").replace(",","."))
+            if value >= 0:
+                brew_data["mash_ph"] = value
+                
+        brew_data["mash_start_temp"] = sud["EinmaischenTemp"]
+        brew_data["target_mash_temp"] = sud["EinmaischenTemp"]
+
+        value = float(self.extractFromArray(geraete, "Grainfather Mash Thickness", "-1").replace(",","."))
+        if value >= 0:
+            brew_data["mash_thickness"] = value
+
+        brew_data["grain_temp"] = 20.0 # TBD
+
+        data["notes"] = re.sub(r'\[\[[^\]]*\]\]\n?', r'', sud["Kommentar"]).strip()
+        brew_data["notes"] = "This brew session record has been created by Grainfather.py based on data from Kleiner Brauhelfer."
+        data["source_srm"] = float("%.1f" % (float(sud["erg_Farbe"]) * 0.508))
         data["bjcp_style_id"] = self.extractFromText(sud["Kommentar"], "BJCP-Style")
         data["is_active"] = True # what is this?
+        brew_data["is_active"] = True # what is this?
         data["is_public"] = self.extractFromText(sud["Kommentar"], "Public", default=False)
+        brew_data["is_public"] = data["is_public"]
         data["unit_type_id"] = UnitType.METRIC.value;
+        brew_data["unit_type_id"] = data["unit_type_id"]
         
         # fermentables
         data["fermentables"] = []
@@ -831,41 +981,97 @@ class KleinerBrauhelfer(object):
                 i += 1
 
         # brew session
-        brew_data["created_at"] = data["created_at"]
-        brew_data["updated_at"] = data["updated_at"]
-        brew_data["is_active"] = data["is_active"]
-        brew_data["is_public"] = data["is_public"]
-        brew_data["unit_type_id"] = data["unit_type_id"]
+        #brew_data["created_at"] = data["created_at"]
+        #brew_data["updated_at"] = data["updated_at"]
+        #brew_data["is_active"] = data["is_active"]
+        #brew_data["is_public"] = data["is_public"]
+        #brew_data["unit_type_id"] = data["unit_type_id"]
         brew_data["grain_weight"] = grain_weight
-        brew_data["boil_time"] = data["boil_time"]
+        #brew_data["boil_time"] = data["boil_time"]
         brew_data["strike_water_volume"] = sud["erg_WHauptguss"]
         brew_data["sparge_water_volume"] = sud["erg_WNachguss"]
         brew_data["total_water_needed"] = brew_data["strike_water_volume"] + brew_data["sparge_water_volume"]
         brew_data["strike_water_temp"] = sud["EinmaischenTemp"]
         #brew_data["boil_volume_est"] = 
-        #brew_data["ferment_volume_est"] = 
-
+        brew_data["ferment_volume_est"] = data["batch_size"]
         
+        temp = 78
+        order = -1
+        time = 0
+        for m in data["mash_steps"]:
+            if m["order"] >= 0 and m["temperature"] > 20:
+                temp = m["temperature"]
+                order = m["order"]
+                time += m["time"]
+        brew_data["mash_end_temp"] = temp
+        # add time for heating from start temp to mash out temp (approx. 30sec/degree?!)
+        time += round((brew_data["mash_end_temp"] - brew_data["mash_start_temp"]) / 2)
+        brew_data["mash_time"] = time
+
+        brew_data["condition_date"] = "%sT00:00:00.000000Z" % sud["Abfuelldatum"][:10]
+        s = self.extractFromText(sud["Kommentar"], "Gebinde")
+        if s and any(x in s for x in ["Fass", "Faß", "Keg", "Cask", "Barrel", "19", "18", "17"]):
+            brew_data["condition_id"] = ConditionType.KEG.value
+        else:
+            brew_data["condition_id"] = ConditionType.BOTTLE.value
+        s = self.extractFromText(sud["Kommentar"], "Zucker")
+        
+        temperature = sud["TemperaturJungbier"]
+        #co2beer = 3.1557 * math.exp(-0.032 * temperature) # fabier
+        co2beer = 1.013 * ( math.pow(2.71828182845904, (-10.73797 + (2617.25 / (temperature + 273.15))))) * 10; # kbh
+        co2add = sud["CO2"] - co2beer
+        menge = sud["JungbiermengeAbfuellen"]
+        hz = (co2add * 1.0 / 0.468) * menge
+        tz = hz * 1.16
+        brew_data["priming_sugar_type"] = "Haushaltszucker"
+        # from KBH:
+        #        DichteRestextrakt = GetDichte(Restextrakt);
+        #        CO2Saettigung = 1.013 * ( pow(2.71828182845904, (-10.73797 + (2617.25 / (Temperatur + 273.15) ) ) ) ) * 10;
+        #        BenoetigteKarbonisierung = SollCO2 - CO2Saettigung;
+        #        ErforderlicherZuckerEndvergoren = 2 * BenoetigteKarbonisierung;
+        #        Gruenschlauchzeitpunkt = Restextrakt + (ErforderlicherZuckerEndvergoren / (8.192 * DichteRestextrakt));
+        #        ErforderlicherZucker = (Gruenschlauchzeitpunkt - Restextrakt) * 8.192 * DichteRestextrakt;
+        brew_data["priming_sugar_amount"] = round(hz)
+        # from KBH:
+        bar = sud["CO2"] / ((math.pow(2.71828182845904, (-10.73797 + (2617.25 / (temperature + 273.15))))) * 10) - 1.013
+        psi = bar * 14.5038
+        brew_data["keg_psi"] = round(psi)
+
         if sud["BierWurdeVerbraucht"]:
-            brew_data["status"] = BrewStatusType.COMPLETE
+            brew_data["status"] = BrewStatusType.COMPLETE.value
         elif sud["BierWurdeAbgefuellt"]:
             # Note: the transition from CONDITIONING to COMPLETE is
             # dynamic, it depends on the current date compared to the
             # kegging date plus conditioning weeks.
             d = datetime.datetime.strptime(sud["Abfuelldatum"][:10], '%Y-%m-%d') + datetime.timedelta(weeks = sud["Reifezeit"])
             if  datetime.datetime.now() > d:
-                brew_data["status"] = BrewStatusType.COMPLETE
+                brew_data["status"] = BrewStatusType.COMPLETE.value
             else:
-                brew_data["status"] = BrewStatusType.CONDITIONING
+                brew_data["status"] = BrewStatusType.CONDITIONING.value
         elif sud["BierWurdeGebraut"]:
-            brew_data["status"] = BrewStatusType.FERMENTATION
+            brew_data["status"] = BrewStatusType.FERMENTATION.value
         else:
-            brew_data["status"] = BrewStatusType.BREWDAY
+            brew_data["status"] = BrewStatusType.BREWDAY.value
+
+        # no official GF attribute, but the name is used later to search the equipment_profiles_id
+        brew_data["equipment_profiles"] = sud["AuswahlBrauanlageName"]
+
+        # these brew attributes are not set:
+        # "fermentation_device_id"
+        # "first_runnings_volume"
+        # "rating"
+        # "recipe"
+        # "runoff_volume"
 
         # finally create the Recipe and Brew objects from the dicts
         r = Recipe(data=data, brew_data=brew_data)
 
         r.recalculate(force=False)
+
+        if data["og"] > 1.0:
+            data["bggu"] = float(data["ibu"]) / (float(data["og"]) - 1.0) / 1000
+        else:
+            data["bggu"] = 0
 
         return r
 
@@ -1066,6 +1272,8 @@ class Session(object):
 
         if self.stateFile:
             self.loadState()
+            
+        self.brewingEquipment = BrewingEquipment(self)
 
 
 
@@ -1128,7 +1336,7 @@ class Session(object):
 
 
 
-    def register(self, obj, id=None):
+    def register(self, obj, recipe_id=None, id=None):
 
         """If the given object has been defined locally and is not yet registered to
         a Grainfather session, this method will register it without actually saving
@@ -1137,6 +1345,9 @@ class Session(object):
 
         if id:
             obj.set("id", id)
+
+        if recipe_id:
+            obj.set("recipe_id", recipe_id)
 
         if obj.session == None:
             obj.session = self
@@ -1188,25 +1399,37 @@ class Session(object):
         if brews:
             for recipe in recipes:
                 recipe.getBrews(full=full)
+                # XXX print(json.dumps(recipe.brews[0].data, sort_keys=True, indent=4))
 
         return recipes
 
 
 
-    def getMyRecipe(self, namepattern=None, full=True, brews=False):
+    def getMyRecipe(self, namepattern=None, id=None, full=True, brews=False):
 
-        recipes = self.getMyRecipes(namepattern, full=full, brews=brews)
+        if id:
 
-        if len(recipes) == 0:
-            self.logger.warn("pattern did not result in any entry")
-            return None
+            recipe = Recipe(session=self.session, id=id)
 
-        if len(recipes) > 1:
-            self.logger.warn("pattern did not result in a unique entry")
-            return None
+            return recipe
 
-        return recipes[0]
+        else:
 
+            recipes = self.getMyRecipes(namepattern, full=full, brews=brews)
+
+            if len(recipes) == 0:
+                self.logger.warn("pattern did not result in any entry")
+                return None
+
+            if len(recipes) > 1:
+                self.logger.warn("pattern did not result in a unique entry")
+                return None
+
+            return recipes[0]
+
+
+
+    
 
 
 class AdjunctUsageType(Enum):
@@ -1280,14 +1503,30 @@ class BrewStatusType(Enum):
 
     def getName(id):
         
-        if id == BrewStatusType.BREWDAY:
+        if id == BrewStatusType.BREWDAY.value:
             return "Brew Day"
-        elif id == BrewStatusType.FERMENTATION:
+        elif id == BrewStatusType.FERMENTATION.value:
             return "Fermentation"
-        elif id == BrewStatusType.CONDITIONING:
+        elif id == BrewStatusType.CONDITIONING.value:
             return "Conditioning"
-        elif id == BrewStatusType.COMPLETE:
+        elif id == BrewStatusType.COMPLETE.value:
             return "Complete"
+        else:
+            return "Unknown"
+
+
+
+class ConditionType(Enum):
+
+    BOTTLE		= 10
+    KEG          	= 20
+
+    def getName(id):
+        
+        if id == ConditionType.BOTTLE.value:
+            return "Bottle"
+        elif id == ConditionType.KEG.value:
+            return "Keg"
         else:
             return "Unknown"
 
@@ -1296,16 +1535,17 @@ class BrewStatusType(Enum):
 class Object(object):
 
     session = None
-    data = None
+    data = {}
 
 
 
-    def __init__(self, session=None, id=None, data=None):
+    def __init__(self, session=None, id=None, data={}):
 
         self.session = session
-        self.data  = data
+        self.data = data
 
-        self.tidy()
+        if self.data:
+            self.tidy()
         
         if self.session:
             
@@ -1325,29 +1565,39 @@ class Object(object):
 
 
 
-    def reload(self, id=None):
+    def reload(self, id=None, recipe_id=None):
 
-        if not id:
+        if not id and ("id" in self.data):
             id = self.data["id"]
+        if not recipe_id and "recipe_id" in self.data:
+            recipe_id = self.data["recipe_id"]
+            
+        response = self.session.get(self.urlload.format(api_token=self.session.state["api_token"], recipe_id=recipe_id, id=id))
 
-        response = self.session.get(self.urlload.format(api_token=self.session.state["api_token"], id=id))
-        self.data = json.loads(response.text)
+        if response and response.status_code == 200:
+            self.data = json.loads(response.text)
 
 
 
-    def save(self, id=None):
+    def save(self, id=None, recipe_id=None):
 
         if id:
             self.data["id"] = id
 
+        if recipe_id:
+            self.data["recipe_id"] = recipe_id
+
+        if not recipe_id and "recipe_id" in self.data:
+            recipe_id = self.data["recipe_id"]
+
         self.tidy()
 
         if self.isBound():
-            response = self.session.put(self.urlsave.format(api_token=self.session.state["api_token"], id=self.data["id"]), json=self.data)
+            response = self.session.put(self.urlsave.format(api_token=self.session.state["api_token"], recipe_id=recipe_id, id=self.data["id"]), json=self.data)
         else:
-            response = self.session.post(self.urlcreate.format(api_token=self.session.state["api_token"]), json=self.data)
+            response = self.session.post(self.urlcreate.format(api_token=self.session.state["api_token"], recipe_id=recipe_id), json=self.data)
 
-        if response:
+        if response and response.status_code == 200:
             self.data = json.loads(response.text)
 
 
@@ -1361,13 +1611,17 @@ class Object(object):
     def __str__(self):
 
         s = "<"
-        if "status" in self.data:
-            s += "%s " % self.data["status"]
+#        if "status" in self.data:
+#            s += "%s " % self.data["status"]
+#        else:
+#            if self.session:
+#                s += "registered "
+#            else:
+#                s += "unregistered "
+        if self.session:
+            s += "registered "
         else:
-            if self.session:
-                s += "registered "
-            else:
-                s += "unregistered "
+            s += "unregistered "
         s += "%s" % (self.__class__.__name__)
         if "id" in self.data:
             s += " id %s" % self.data["id"]
@@ -1417,10 +1671,7 @@ class Object(object):
         false, some attributes may be missing, which happens for
         search results, for example."""
 
-        if "fermentables" in self.data:
-            return True
-        else:
-            return False
+        return True
 
 
 
@@ -1475,6 +1726,28 @@ class Recipe(Object):
 
 
 
+    def isFull(self):
+
+        """Checks whether the object contains all attributes. When
+        false, some attributes may be missing, which happens for
+        search results, for example."""
+
+        if "fermentables" in self.data:
+            return True
+        else:
+            return False
+
+
+
+    def reload(self, full=False, brews=False):
+
+        super(Recipe, self).reload()
+
+        if brews:
+            self.getBrews(full=full)
+
+
+
     def toGal(self, value):
 
         if self.data['unit_type_id'] == UnitType.METRIC.value:
@@ -1511,9 +1784,17 @@ class Recipe(Object):
         that hold already some value, are only recalculated, if the
         force flags is True."""
 
+        ## og       from fermentables (amount, ppg, usage), efficiency, batch_size, losses
+        ## fg       from og and attenuation
+        ## abv      from og and fg
+        ## srm      from fermentables (amount, lovibond), batch_size, losses
+        ## calories from og and fg
+        ## ibu      from hops (amount, aa, time, usage), og
+        ## bugu     from ibu, og
+
         ## most parts of these calculations are based on the
         ## javascript code from the Grainfather web frontend, so that
-        ## our calculations match those after uploading recipes.
+        ## our calculations should match those after uploading recipes.
 
         attenuation = 0.75 # if we do not know any better
         if ("yeasts" in self.data) and (len(self.data["yeasts"]) > 0):
@@ -1546,7 +1827,7 @@ class Recipe(Object):
                         earlyGravityPoints += g
                     color += self.toLb(fermentable["amount"]) * fermentable["lovibond"] / postBoilVolume
         else:
-            totalGravityPoints = 0
+            totalGravityPoints = 0.0
 
         if (force) or (not "og" in self.data) or (self.data["og"] == None) or (float(self.data["og"]) <= 1.000):
             self.data["og"] = float("%.3f" % (1.0 + totalGravityPoints / 1000))
@@ -1561,8 +1842,8 @@ class Recipe(Object):
 
         earlyOG = 1.0 + earlyGravityPoints / 1000
             
+        totalIBU = 0.0
         if ("hops" in self.data) and (len(self.data["hops"]) > 0):
-            totalIBU = 0.0
             for hop in self.data["hops"]:
                 ibu = 0.0
                 if hop["hop_usage_type_id"] in [HopUsageType.MASH.value, HopUsageType.FIRSTWORT.value, HopUsageType.BOIL.value, HopUsageType.AROMA.value]:
@@ -1587,13 +1868,13 @@ class Recipe(Object):
                     totalIBU += ibu
                 if (force) or (not "ibu" in hop) or (hop["ibu"] == None):
                     hop["ibu"] = float("%0.01f" % ibu)
-            if (force) or (not "ibu" in self.data) or (self.data["ibu"] == None):
-                self.data["ibu"] = float("%0.01f" % totalIBU)
+        if (force) or (not "ibu" in self.data) or (self.data["ibu"] == None) or (float(self.data["ibu"]) <= 0.0):
+            self.data["ibu"] = float("%0.01f" % totalIBU)
 
         if (force) or (not "bggu" in self.data) or (self.data["bggu"] == None) or (float(self.data["bggu"]) <= 0.0):
             if (self.data["og"] <= 1.0) and (self.data["ibu"]) > 0:
                 self.data["bggu"] = 1.0
-            elif (self.data["og"] == 0) and (self.data["ibu"]) == 0:
+            elif (self.data["og"] <= 1.0) and (self.data["ibu"]) == 0:
                 self.data["bggu"] = 0.0
             else:
                 self.data["bggu"] = self.data["ibu"] / ((self.data["og"] - 1.0) * 1000)
@@ -1627,7 +1908,7 @@ class Recipe(Object):
 
         if full:
             for brew in self.brews:
-                brew.reload()
+                brew.reload(recipe_id=self.get("id"))
 
         return self.brews
 
@@ -1667,6 +1948,38 @@ class Brew(Object):
         if not 'recipe_id' in self.data:
             self.data['recipe_id'] = None
 
+        # no official GF attribute, but the name is used later to search the equipment_profiles_id
+        if (not 'equipment_profiles_id' in self.data) and (self.session):
+            for e in self.session.brewingEquipment.data:
+                if e["name"] == self.data['equipment_profiles']:
+                    self.data['equipment_profiles_id'] = e["id"]
+
+
+
+    def isFull(self):
+
+        """Checks whether the object contains all attributes. When
+        false, some attributes may be missing, which happens for
+        search results, for example."""
+
+        if "ferment_volume_actual" in self.data:
+            return True
+        else:
+            return False
+
+
+
+class BrewingEquipment(Object):
+
+    urlload = "https://brew.grainfather.com/my-equipment/brewing/data"
+
+
+
+    def __init__(self, session=None):
+
+        super(BrewingEquipment, self).__init__(session=session)
+        self.reload()
+
 
 
 class Fermentable(Object):
@@ -1703,6 +2016,8 @@ class Interpreter(object):
         flagSortNames = False
         flagSortDates = False
 
+        all_recipes = []
+
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
@@ -1731,7 +2046,9 @@ class Interpreter(object):
             namepattern = "*"
 
         gf_recipes = self.session.getMyRecipes(namepattern, brews=flagBrews)
-        all_recipes = gf_recipes
+        for recipe in gf_recipes:
+            if recipe.get("name") not in [r.get("name") for r in all_recipes]:
+                all_recipes.append(recipe)
 
         if self.kbh:
             kbh_recipes = self.kbh.getRecipes(namepattern)
@@ -1752,7 +2069,7 @@ class Interpreter(object):
         for name in [r.get("name") for r in all_recipes]:
 
             if firstLine:
-                print("%8s flags %16s %16s %7s %s" % ("ID", "KBH update", "GF update", "size", "name/attributes"))
+                print("%8s flags %16s %16s %7s %s" % ("ID", "KBH up-/brewdate", "GF up-/brewdate", "size", "name/attributes"))
                 firstLine = False
 
             # try to find the GF and KBH representations of the current recipe name
@@ -1778,14 +2095,15 @@ class Interpreter(object):
             if flagBrews:
 
                 # KBH has a representation of exactly one brew per recipe
-                # TBD...
                 kbh_brew = None
+                if kbh_recipe and len(kbh_recipe.brews) >= 1:
+                    kbh_brew = kbh_recipe.brews[0]
 
                 if gf_recipe:
 
                     gf_brews = gf_recipe.brews
 
-                    # TBD: sort (by date, newest last)
+                    # sort (by date, newest last)
                     gf_brews = sorted(gf_brews, key=lambda b: b.get("updated_at"))
 
                     if len(gf_brews) > 0:
@@ -1798,26 +2116,29 @@ class Interpreter(object):
 
                     for brew in brews:
 
-                        if brew == brews[-1]:
-                            latest = True
-                        else:
-                            latest = False
-
-                        attrs = []
-                        attrs.append(BrewStatusType.getName(brew.get("status")))
+                        showkbh = False
+                        found = False
+                        if ((brew == brews[-1]) and (not found)) or (Util.utcToLocal(brew.get("created_at"))[:10] == Util.utcToLocal(kbh_brew.get("created_at"))[:10]):
+                            showkbh = True
+                            found = True
+                        attrs = [BrewStatusType.getName(brew.get("status"))]
+                        #if brew.get("status") == BrewStatusType.COMPLETE.value:
+                        #    attrs.append(...)
                         attrs = str(attrs)
 
                         # TBD
-                        volume = brew.get("boil_volume_est")
+                        volume = brew.get("ferment_volume_actual")
+                        if (not volume) or (volume <= 0):
+                            volume = brew.get("ferment_volume_est")
 
-                        print("%8s b%s%s%s%s %16s %16s %7s %s" %
+                        print("%8s b%s%s%s%s %-16s %-16s %7s %s" %
                               (brew.get("id") if brew.get("id") else "-",
-                               "k" if kbh_brew and (latest == True) else "-",
+                               "k" if kbh_brew and (showkbh == True) else "-",
                                "g" if len(gf_brews) > 0 else "-",
                                "p" if brew.get("is_public") else "-",
-                               "o" if kbh_brew and (latest == True) and len(gf_brews) > 0 and kbh_brew.get("updated_at") > brew.get("updated_at") else "-",
-                               Util.utcToLocal(kbh_brew.get("updated_at"))[:16] if kbh_brew and (latest == True) and len(gf_brews) > 0 else "-",
-                               Util.utcToLocal(brew.get("updated_at"))[:16] if len(gf_brews) > 0 else "-",
+                               "o" if kbh_brew and (showkbh == True) and len(gf_brews) > 0 and kbh_brew.get("updated_at") > brew.get("updated_at") else "-",
+                               Util.utcToLocal(kbh_brew.get("created_at"))[:10] if kbh_brew and (showkbh == True) and len(gf_brews) > 0 else "-",
+                               Util.utcToLocal(brew.get("created_at"))[:10] if len(gf_brews) > 0 else "-",
                                "%.1f" % (volume) + "l" if brew.get("unit_type_id") == 10 else "gal",
                                attrs))
 
@@ -1825,25 +2146,68 @@ class Interpreter(object):
 
     def dump(self, args):
 
-        if not self.session:
-            self.logger.error("No Grainfather session, use -u and -p/-P options")
+        do_k = False
+        do_g = False
+        flagBrews = False
+        flagRecalculate = False
+
+        try:
+            opts, args = getopt.getopt(args, "kgbr", ["kbh", "grainfather", "brews", "recalculate"])
+        except getopt.GetoptError as err:
+            self.logger.error(str(err))
             return
+        for o, a in opts:
+            if o in ("-k", "--kbh"):
+                do_k = True
+            elif o in ("-g", "--grainfather"):
+                do_g = True
+            elif o in ("-b", "--brews"):
+                flagBrews = True
+            elif o in ("-r", "--recalculate"):
+                flagRecalculate = True
+            else:
+                assert False, "unhandled option"
+                
+        if not do_k and not do_g and not do_b:
+            do_g = True
 
         if len(args) >= 1:
             namepattern = args[0]
         else:
             namepattern = "*"
 
-        recipes = self.session.getMyRecipes(namepattern, full=True)
+        if do_k:
+            if not self.kbh:
+                self.logger.error("No KBH database, use -k option")
+                return
+            recipes = self.kbh.getRecipes(namepattern)
+            for recipe in recipes:
+                if flagRecalculate:
+                    recipe.recalculate(force=True)
+                recipe.print()
+                if flagBrews:
+                    for brew in recipe.brews:
+                        brew.print()
 
-        for recipe in recipes:
-            
-            recipe.print()
+        if do_g:
+            if not self.session:
+                self.logger.error("No Grainfather session, use -u and -p/-P options")
+                return
+            recipes = self.session.getMyRecipes(namepattern, full=True, brews=flagBrews)
+            for recipe in recipes:
+                if flagRecalculate:
+                    recipe.recalculate(force=True)
+                recipe.print()
+                if flagBrews:
+                    for brew in recipe.brews:
+                        brew.print()
 
 
 
     def push(self, args):
         
+        flagBrews = False
+
         if not self.kbh:
             self.logger.error("No KBH database, use -k option")
             return
@@ -1851,6 +2215,17 @@ class Interpreter(object):
         if not self.session:
             self.logger.error("No Grainfather session, use -u and -p/-P options")
             return
+
+        try:
+            opts, args = getopt.getopt(args, "b", ["brews"])
+        except getopt.GetoptError as err:
+            self.logger.error(str(err))
+            return
+        for o, a in opts:
+            if o in ("-b", "--brew"):
+                flagBrews = True
+            else:
+                assert False, "unhandled option"
 
         if len(args) >= 1:
             namepattern = args[0]
@@ -1864,6 +2239,7 @@ class Interpreter(object):
         # we have to know all our recipes on the GF server so that
         # we can decide which recipe to create and which to update
         gf_recipes = self.session.getMyRecipes()
+        #gf_recipes = self.session.getMyRecipes(brews=flagBrews)
 
         for kbh_recipe in kbh_recipes:
             
@@ -1886,7 +2262,35 @@ class Interpreter(object):
                 self.logger.info("Creating %s" % kbh_recipe)
                 self.session.register(kbh_recipe)
                 kbh_recipe.save()
+                gf_recipe = kbh_recipe
             
+            if flagBrews and len(kbh_recipe.brews) >= 1:
+
+                kbh_brew = kbh_recipe.brews[0]
+
+                # reload, including full brews
+                gf_recipe.reload(full=True, brews=True)
+
+                # search for some brew session on the Grainfather site, based on brew date
+                gf_brew = None
+                for brew in gf_recipe.brews:
+                    if (Util.utcToLocal(brew.get("created_at"))[:10] == Util.utcToLocal(kbh_brew.get("created_at"))[:10]):
+                        gf_brew = brew
+                 
+                if gf_brew:
+                    if (gf_brew.get("updated_at") > kbh_brew.get("updated_at")) and (not self.session.force):
+                        self.logger.info("%s needs no update" % gf_brew)
+                        self.logger.debug("kbh:%s, gf:%s" % (kbh_brew.get("updated_at"), gf_brew.get("updated_at")))
+                    else:
+                        self.session.register(kbh_brew, recipe_id=gf_recipe.get("id"), id=gf_brew.get("id"))
+                        self.logger.info("Updating %s" % gf_brew)
+                        self.logger.debug("kbh:%s, gf:%s" % (kbh_brew.get("updated_at"), gf_brew.get("updated_at")))
+                        kbh_brew.save()
+                else:
+                    self.logger.info("Creating %s" % kbh_brew)
+                    self.session.register(kbh_brew, recipe_id=gf_recipe.get("id"))
+                    kbh_brew.save()
+
 
 
     def delete(self, args):
