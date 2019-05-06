@@ -757,6 +757,8 @@ class KleinerBrauhelfer(object):
         brew_data["is_public"] = data["is_public"]
         data["unit_type_id"] = UnitType.METRIC.value;
         brew_data["unit_type_id"] = data["unit_type_id"]
+
+        data["author"] = self.extractFromText(sud["Kommentar"], "Brauer")
         
         # fermentables
         data["fermentables"] = []
@@ -1460,6 +1462,20 @@ class HopType(Enum):
     PLUG		= 30
     EXTRACT             = 40    # ???
 
+    def getBrewfather(id):
+        
+        if id == HopType.LEAF.value:
+            return "Leaf"
+        elif id == HopType.PELLET.value:
+            return "Pellet"
+        elif id == HopType.PLUG.value:
+            return "Plug"
+        elif id == HopType.EXTRACT.value:
+            return "Extract"
+        else:
+            return "Unknown"
+
+
 
 class HopUsageType(Enum):
 
@@ -1469,6 +1485,23 @@ class HopUsageType(Enum):
     HOPSTAND		= 30	# min # obsolete?
     AROMA		= 30	# min
     DRYHOP		= 40	# days
+
+    def getBrewfather(id):
+        
+        if id == HopUsageType.MASH.value:
+            return "Mash"
+        elif id == HopUsageType.FIRSTWORT.value:
+            return "First Wort"
+        elif id == HopUsageType.BOIL.value:
+            return "Boil"
+        elif id == HopUsageType.HOPSTAND.value:
+            return "Hopstand"
+        elif id == HopUsageType.AROMA.value:
+            return "Aroma"
+        elif id == HopUsageType.DRYHOP.value:
+            return "Dry Hop"
+        else:
+            return "Unknown"
 
 
 
@@ -1914,6 +1947,68 @@ class Recipe(Object):
 
 
 
+    def convertToBrewfather(self):
+
+        r = {}
+
+        r["_type"] = "recipe"
+        r["author"] = self.data["author"]
+        r["name"] = self.data["name"]
+        r["notes"] = self.data["notes"]
+        r["description"] = self.data["description"]
+
+        r["abv"] = self.data["abv"]
+        r["batchSize"] = self.data["batch_size"]
+        r["boilTime"] = self.data["boil_time"]
+        r["buGuRatio"] = self.data["bggu"]
+        r["color"] = self.data["srm"]
+        r["efficiency"] = self.data["efficiency"] * 100
+        r["og"] = self.data["og"]
+        r["fg"] = self.data["fg"]
+        r["ibu"] = self.data["ibu"]
+
+        r["fermentables"] = []
+        for f in self.data["fermentables"]:
+            r["fermentables"].append({
+                    "name": f["name"],
+                    "color": f["lovibond"],
+                    "amount": f["amount"],
+                    "potential": 1.0 + f["ppg"] / 1000,
+                    })
+
+        r["hops"] = []
+        for h in self.data["hops"]:
+            r["hops"].append({
+                    "name": h["name"],
+                    "time": h["time"],
+                    "alpha": h["aa"],
+                    "amount": h["amount"],
+                    "type": HopType.getBrewfather(h["hop_type_id"]),
+                    "use": HopUsageType.getBrewfather(h["hop_usage_type_id"])
+                    })
+
+        r["mash"] = { "steps": [] }
+        for m in self.data["mash_steps"]:
+            r["mash"]["steps"].append({
+                    "name": m["name"],
+                    "stepTemp": m["temperature"],
+                    "stepTime": m["time"],
+                    "type": "Temperature"
+                    })
+
+        r["yeasts"] = []
+        for y in self.data["yeasts"]:
+            r["yeasts"].append({
+                    "name": y["name"],
+                    "attenuation": y["attenuation"] * 100,
+                    "amount": y["amount"],
+                    "unit": y["unit"]
+                    })
+
+        return r
+
+
+
 class Brew(Object):
 
     urlload = "https://brew.grainfather.com/recipes/{recipe_id}/brew-sessions/data/{id}"
@@ -2168,7 +2263,7 @@ class Interpreter(object):
             else:
                 assert False, "unhandled option"
                 
-        if not do_k and not do_g and not do_b:
+        if not do_k and not do_g:
             do_g = True
 
         if len(args) >= 1:
@@ -2201,6 +2296,73 @@ class Interpreter(object):
                 if flagBrews:
                     for brew in recipe.brews:
                         brew.print()
+
+
+
+    def convert(self, args):
+
+        do_k = False
+        do_g = False
+        flagBrews = False
+        flagRecalculate = False
+
+        try:
+            opts, args = getopt.getopt(args, "kgbr", ["kbh", "grainfather", "brews", "recalculate"])
+        except getopt.GetoptError as err:
+            self.logger.error(str(err))
+            return
+        for o, a in opts:
+            if o in ("-k", "--kbh"):
+                do_k = True
+            elif o in ("-g", "--grainfather"):
+                do_g = True
+            elif o in ("-b", "--brews"):
+                flagBrews = True
+            elif o in ("-r", "--recalculate"):
+                flagRecalculate = True
+            else:
+                assert False, "unhandled option"
+                
+        if not do_k and not do_g:
+            do_g = True
+
+        if len(args) >= 1:
+            namepattern = args[0]
+        else:
+            namepattern = "*"
+
+        bfr = []
+        bfb = []
+
+        if do_k:
+            if not self.kbh:
+                self.logger.error("No KBH database, use -k option")
+                return
+            recipes = self.kbh.getRecipes(namepattern)
+            for recipe in recipes:
+                if flagRecalculate:
+                    recipe.recalculate(force=True)
+                bfr.append(recipe.convertToBrewfather())
+                if flagBrews:
+                    for brew in recipe.brews:
+                        bfb.append(brew.convertToBrewfather())
+
+        if do_g:
+            if not self.session:
+                self.logger.error("No Grainfather session, use -u and -p/-P options")
+                return
+            recipes = self.session.getMyRecipes(namepattern, full=True, brews=flagBrews)
+            for recipe in recipes:
+                if flagRecalculate:
+                    recipe.recalculate(force=True)
+                bfr.append(recipe.convertToBrewfather())
+                if flagBrews:
+                    for brew in recipe.brews:
+                        bfb.append(brew.convertToBrewfather())
+
+        print(json.dumps(bfr[0], sort_keys=True, indent=4))
+        if flagBrews:
+            print(str.encode(json.dumps(bfb[0], sort_keys=True, indent=4)))
 
 
 
@@ -2618,4 +2780,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
